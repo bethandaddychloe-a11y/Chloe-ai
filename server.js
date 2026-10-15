@@ -126,8 +126,10 @@ async function getCandles(sym, tf, size) {
       lastSource[sym] = src; cache.set(key, { at: Date.now(), cs }); return cs;
     } catch (e) { err = err || e; srcErr[sym + ':' + src] = e.message; }
   }
-  if (hit) return hit.cs; // better stale than nothing
-  throw err;
+  // Never silently use an expired candle cache for a fresh signal request.
+  // If every configured provider fails, surface the error so the UI can show
+  // that market data is unavailable instead of presenting stale prices as live.
+  throw err || new Error('No market-data provider returned fresh candles');
 }
 function dropForming(cs, tf) {
   const last = cs[cs.length - 1], t = Date.parse(last.t.replace(' ', 'T') + 'Z');
