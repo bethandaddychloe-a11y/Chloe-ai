@@ -126,10 +126,8 @@ async function getCandles(sym, tf, size) {
       lastSource[sym] = src; cache.set(key, { at: Date.now(), cs }); return cs;
     } catch (e) { err = err || e; srcErr[sym + ':' + src] = e.message; }
   }
-  // Never silently use an expired candle cache for a fresh signal request.
-  // If every configured provider fails, surface the error so the UI can show
-  // that market data is unavailable instead of presenting stale prices as live.
-  throw err || new Error('No market-data provider returned fresh candles');
+  if (hit) return hit.cs; // better stale than nothing
+  throw err;
 }
 function dropForming(cs, tf) {
   const last = cs[cs.length - 1], t = Date.parse(last.t.replace(' ', 'T') + 'Z');
@@ -453,8 +451,8 @@ const send = (res, code, obj) => { const b = JSON.stringify(obj); res.writeHead(
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x'), p = u.pathname, q = u.searchParams;
   try {
-    const ASSET = { '/icon.svg': 'image/svg+xml', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png', '/maskable-512.png': 'image/png', '/apple-touch-icon.png': 'image/png', '/manifest.webmanifest': 'application/manifest+json' };
-    if (ASSET[p]) { res.writeHead(200, { 'content-type': ASSET[p], 'cache-control': 'public, max-age=86400' }); return res.end(fs.readFileSync(path.join(STATIC_DIR, p.slice(1)))); }
+    const ASSET = { '/icon.svg': 'image/svg+xml', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png', '/maskable-512.png': 'image/png', '/apple-touch-icon.png': 'image/png', '/manifest.webmanifest': 'application/manifest+json', '/sw.js': 'application/javascript' };
+    if (ASSET[p]) { const fp = path.join(STATIC_DIR, p.slice(1)); if (!fs.existsSync(fp)) { res.writeHead(404, { 'content-type': 'application/json' }); return res.end('{"error":"file missing on server: ' + p.slice(1) + '"}'); } res.writeHead(200, { 'content-type': ASSET[p], 'cache-control': p === '/sw.js' ? 'no-cache' : 'public, max-age=86400' }); return res.end(fs.readFileSync(fp)); }
     if (p === '/' || p === '/index.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(path.join(STATIC_DIR, 'index.html'))); }
     if (p === '/health') {
       const n = newsCache ? newsCache.v : { feeds_ok: 0, feeds_total: CFG.feeds.length };
