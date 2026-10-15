@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="38%" r="75%"><stop offset="0" stop-color="#14465a"/><stop offset=".55" stop-color="#0a1f2b"/><stop offset="1" stop-color="#050d14"/></radialGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2cf5c0"/><stop offset=".6" stop-color="#22b8e8"/><stop offset="1" stop-color="#6a7bff"/></linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe27a"/><stop offset="1" stop-color="#ff9f1c"/></linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="9" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="196" fill="none" stroke="#1d5a6e" stroke-opacity=".35" stroke-width="2"/>
+  <!-- C ring, open to the right -->
+  <path d="M 383.4 163.2 A 160 160 0 1 0 383.4 348.8" fill="none" stroke="url(#ring)" stroke-width="40" stroke-linecap="round" filter="url(#glow)"/>
+  <!-- rising candles -->
+  <g stroke-linecap="round">
+    <line x1="206" y1="286" x2="206" y2="352" stroke="#2cf5c0" stroke-width="7"/><rect x="190" y="305" width="32" height="34" rx="6" fill="#2cf5c0"/>
+    <line x1="262" y1="238" x2="262" y2="328" stroke="#2cf5c0" stroke-width="7"/><rect x="246" y="258" width="32" height="52" rx="6" fill="#2cf5c0"/>
+    <line x1="318" y1="170" x2="318" y2="288" stroke="#ffd35a" stroke-width="7"/><rect x="302" y="190" width="32" height="76" rx="6" fill="url(#gold)" filter="url(#glow)"/>
+  </g>
+  <!-- AI spark -->
+  <path d="M 410 96 L 419 124 L 447 133 L 419 142 L 410 170 L 401 142 L 373 133 L 401 124 Z" fill="#ffffff" filter="url(#glow)"/>
+  <path d="M 448 186 L 452 199 L 465 203 L 452 207 L 448 220 L 444 207 L 431 203 L 444 199 Z" fill="#9be8ff"/>
+</svg>
