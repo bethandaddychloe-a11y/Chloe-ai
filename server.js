@@ -431,6 +431,8 @@ async function broker() {
   } catch (e) { return { hosted: true, configured: true, ok: false, error: e.message }; }
 }
 
+/* the folder may be named static or Static depending on how it was uploaded */
+const STATIC_DIR = (() => { for (const n of ['static', 'Static', 'STATIC']) { const d = path.join(__dirname, n); if (fs.existsSync(d)) return d; } return path.join(__dirname, 'static'); })();
 const readBody = req => new Promise((ok, no) => { let d = ''; req.on('data', c => { d += c; if (d.length > 200000) { req.destroy(); no(new Error('too big')); } }); req.on('end', () => ok(d)); req.on('error', no); });
 let EVCTX = null; try { EVCTX = ENV.EVENT_CTX ? JSON.parse(ENV.EVENT_CTX) : null; } catch (e) {}
 async function forecasts() {
@@ -450,8 +452,8 @@ const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x'), p = u.pathname, q = u.searchParams;
   try {
     const ASSET = { '/icon.svg': 'image/svg+xml', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png', '/maskable-512.png': 'image/png', '/apple-touch-icon.png': 'image/png', '/manifest.webmanifest': 'application/manifest+json' };
-    if (ASSET[p]) { res.writeHead(200, { 'content-type': ASSET[p], 'cache-control': 'public, max-age=86400' }); return res.end(fs.readFileSync(path.join(__dirname, 'static', p.slice(1)))); }
-    if (p === '/' || p === '/index.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(path.join(__dirname, 'static', 'index.html'))); }
+    if (ASSET[p]) { res.writeHead(200, { 'content-type': ASSET[p], 'cache-control': 'public, max-age=86400' }); return res.end(fs.readFileSync(path.join(STATIC_DIR, p.slice(1)))); }
+    if (p === '/' || p === '/index.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(path.join(STATIC_DIR, 'index.html'))); }
     if (p === '/health') {
       const n = newsCache ? newsCache.v : { feeds_ok: 0, feeds_total: CFG.feeds.length };
       return send(res, 200, { ok: true, twelve_data_key: !!CFG.tdKey, telegram: !!(CFG.tgToken && CFG.tgChat), metaapi: !!(CFG.maToken && CFG.maAcc), btc_source: lastSource.BTCUSD || CFG.btcSource, credits_today: credits.day === today() ? credits.n : 0, credit_limit: CFG.creditLimit, sod_hour_utc: CFG.sodHour, last_sod: state.sod ? state.sod.date + ': ' + state.sod.txt : null, feeds_ok: n.feeds_ok, feeds_total: n.feeds_total, feeds: n.feeds || {}, data_order: CFG.dataOrder, last_sources: lastSource, source_errors: srcErr, calendar: calStatus, tg_buttons: tgHook, watch: CFG.watch, scalp_watch: CFG.scalpWatch, storage: UP.url ? 'upstash' : 'temp file (may reset on restart)', storage_error: storeErr, paper_open: state.paper.trades.filter(t => t.status !== 'closed').length, paper_closed: state.paper.trades.filter(t => t.status === 'closed').length });
