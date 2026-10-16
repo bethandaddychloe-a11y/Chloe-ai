@@ -2410,3 +2410,4 @@ renderJournal();
 liveWanted=true;$('btnLive').hidden=false;$('btnLive2').hidden=false;refresh();startLive();loadAutoNews();setTimeout(scanAll,2500);setInterval(scanAll,900000);
 })();
 </script>
+<script>if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js').catch(function(){});});}</script>
