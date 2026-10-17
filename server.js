@@ -7,6 +7,8 @@ let curDec = 2;
 global.fmt = function (x) { return Number(x).toFixed(curDec); };
 const E = require('./engine.js');
 const MACRO = require('./macro.js');
+const INTEL = require('./intel.js');
+const CHAT = require('./chat.js');
 
 const ENV = process.env;
 const CFG = {
@@ -19,11 +21,14 @@ const CFG = {
   ndx: +(ENV.NDX_RATIO || 41.1),
   btcSource: (ENV.BTC_SOURCE || 'binance').toLowerCase(),
   sodHour: +(ENV.SOD_HOUR_UTC || 5),
-  watch: (ENV.WATCH || 'XAUUSD:H4,BTCUSD:H4,USDJPY:H4,GBPUSD:H4,USTEC:H4').split(',').map(s => s.trim()).filter(Boolean),
-  scalpWatch: (ENV.SCALP_WATCH || 'XAUUSD:M5,BTCUSD:M5,USDJPY:M5').split(',').map(s => s.trim()).filter(Boolean),
+  stratMode: (ENV.STRATEGY || 'sweep').trim(),
+  watch: (ENV.WATCH || 'XAUUSD:H4').split(',').map(s => s.trim()).filter(Boolean),
+  scalpWatch: (ENV.SCALP_WATCH || 'XAUUSD:M5').split(',').map(s => s.trim()).filter(Boolean),
   minConf: +(ENV.MIN_CONFIDENCE || 55), scalpMinConf: +(ENV.SCALP_MIN_CONFIDENCE || 50),
   scalpCooldownMin: +(ENV.SCALP_COOLDOWN_MIN || 30), scalpMaxPerDay: +(ENV.SCALP_MAX_PER_DAY || 4),
   balance: +(ENV.BALANCE || 1000), riskPct: +(ENV.RISK_PCT || 1),
+  reportHourLocal: +(ENV.REPORT_HOUR_LOCAL || 23), tzOffset: +(ENV.REPORT_TZ_OFFSET == null || ENV.REPORT_TZ_OFFSET === '' ? 3 : ENV.REPORT_TZ_OFFSET), alertCooldownMin: +(ENV.ALERT_COOLDOWN_MIN || 180),
+  llmKey: ENV.ANTHROPIC_API_KEY || '', llmModel: ENV.LLM_MODEL || 'claude-haiku-5-5', llmDaily: +(ENV.LLM_DAILY_LIMIT || 20),
   tdPerMin: +(ENV.TD_PER_MIN || 8), creditLimit: +(ENV.TD_DAILY_LIMIT || 800),
   dataOrder: (ENV.DATA_ORDER || 'td,yahoo').split(',').map(x => x.trim().toLowerCase()).filter(x => x === 'td' || x === 'yahoo'),
   calUrl: ENV.CALENDAR_URL || 'https://nfs.faireconomy.media/ff_calendar_thisweek.json',
@@ -45,16 +50,17 @@ const doFetch = (...a) => global.fetch(...a);
 /* ---------- state: a temp file, plus optional Upstash Redis so it survives restarts ---------- */
 const STATE_FILE = path.join(os.tmpdir(), 'chloe-state.json');
 const UP = { url: ENV.UPSTASH_REDIS_REST_URL || '', token: ENV.UPSTASH_REDIS_REST_TOKEN || '' };
-let state = { sod: null, sent: {}, scalpDay: {}, lastScalp: {}, paper: { trades: [], keys: {}, seq: 0 } }, storeErr = null;
+let state = { sod: null, sent: {}, scalpDay: {}, lastScalp: {}, paper: { trades: [], keys: {}, seq: 0 } }, storeErr = null, bootAt = Date.now(), storageTest = { ok: null, note: 'not tested yet' }, loadedFrom = 'nothing';
 async function upstash(cmd) {
   const r = await doFetch(UP.url, { method: 'POST', headers: { authorization: 'Bearer ' + UP.token, 'content-type': 'application/json' }, body: JSON.stringify(cmd) });
   const j = await r.json(); if (j.error) throw new Error(j.error); return j.result;
 }
 async function loadState() {
-  try { Object.assign(state, JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))); } catch (e) {}
-  if (UP.url && UP.token) { try { const v = await upstash(['GET', 'chloe_state']); if (v) Object.assign(state, JSON.parse(v)); } catch (e) { storeErr = e.message; } }
+  try { Object.assign(state, JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))); loadedFrom = 'temp file'; } catch (e) {}
+  if (UP.url && UP.token) { try { const v = await upstash(['GET', 'chloe_state']); if (v) { Object.assign(state, JSON.parse(v)); loadedFrom = 'Upstash'; } } catch (e) { storeErr = e.message; } }
   state.paper = state.paper || { trades: [], keys: {}, seq: 0 };
   state.forecasts = state.forecasts || {};
+  state.alerts = state.alerts || {}; state.counts = state.counts || {}; state.valid = state.valid || {}; state.rules = state.rules || {}; state.paused = !!state.paused; state.llmUse = state.llmUse || {};
   AUTO.init();
 }
 async function saveState() {
@@ -62,8 +68,8 @@ async function saveState() {
   try { fs.writeFileSync(STATE_FILE, txt); } catch (e) {}
   if (UP.url && UP.token) { try { await upstash(['SET', 'chloe_state', txt]); storeErr = null; } catch (e) { storeErr = e.message; } }
 }
-const AUTO = require('./auto.js')({ CFG, ask: (t, id) => telegramAsk(t, id), fmtPrice: (sym, x) => Number(x).toFixed(INSTR[sym] ? INSTR[sym].dec : 2), tgHook: () => tgHook, events: () => allEvents(), state, saveState, telegram: m => telegram(m), statsOf: rs => statsOf(rs), ENV });
-const ready = loadState();
+const AUTO = require('./auto.js')({ CFG, ask: (t, id) => telegramAsk(t, id), fmtPrice: (sym, x) => Number(x).toFixed(INSTR[sym] ? INSTR[sym].dec : 2), tgHook: () => tgHook, events: () => allEvents(), state, saveState, telegram: m => telegram(m), statsOf: rs => statsOf(rs), paused: () => state.paused, ENV });
+const ready = loadState().then(() => runStorageTest()).catch(() => {});
 const today = () => new Date().toISOString().slice(0, 10);
 
 /* ---------- data sources ---------- */
@@ -89,7 +95,7 @@ async function tdCandles(sym, tf, size) {
   return j.values.slice().reverse().map(v => ({ t: v.datetime, o: +v.open * k, h: +v.high * k, l: +v.low * k, c: +v.close * k }));
 }
 async function binanceCandles(tf, size) {
-  const r = await doFetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=' + TF_BN[tf] + '&limit=' + size);
+  const r = await doFetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=' + TF_BN[tf] + '&limit=' + Math.min(size, 1000));
   const j = await r.json();
   if (!Array.isArray(j)) throw new Error((j && j.msg) || 'Binance refused the request');
   return j.map(x => ({ t: stamp(x[0]), o: +x[1], h: +x[2], l: +x[3], c: +x[4] }));
@@ -111,22 +117,26 @@ async function yahooCandles(sym, tf, size) {
   }
   return rows.slice(-size).map(x => ({ t: stamp(x.ms), o: x.o, h: x.h, l: x.l, c: x.c }));
 }
+const errRun = {};
 async function getCandles(sym, tf, size) {
-  size = Math.max(70, Math.min(500, size || 200));
+  size = Math.max(70, Math.min(size > 500 ? 5000 : 500, size || 200));
   if (!TF_TD[tf]) throw new Error('Unsupported timeframe');
   if (!/^[A-Z]{6}$|^USTEC$/.test(sym)) throw new Error('Unsupported symbol');
   const key = sym + '|' + tf + '|' + size, hit = cache.get(key);
-  if (hit && Date.now() - hit.at < TTL[tf] * 1000) return hit.cs;
+  const ttl = (size > 500 ? 6 * 3600 : TTL[tf]) * 1000;
+  if (hit && Date.now() - hit.at < ttl) return hit.cs;
   const order = sym === 'BTCUSD' && CFG.btcSource !== 'td' ? ['binance'].concat(CFG.dataOrder.length ? CFG.dataOrder : ['td']) : (CFG.dataOrder.length ? CFG.dataOrder : ['td']);
   let err = null;
   for (const src of order) {
     try {
       const cs = src === 'binance' ? await binanceCandles(tf, size) : (src === 'yahoo' ? await yahooCandles(sym, tf, size) : await tdCandles(sym, tf, size));
       if (cs.length < 70) throw new Error('too few candles');
-      lastSource[sym] = src; cache.set(key, { at: Date.now(), cs }); return cs;
-    } catch (e) { err = err || e; srcErr[sym + ':' + src] = e.message; }
+      lastSource[sym] = src; errRun[sym + ':' + src] = 0; delete srcErr[sym + ':' + src];
+      const late = INTEL.freshness(sym, tf, dropForming(cs, tf), Date.now(), false).status === 'stale'; // stale candles are only kept for a minute, so the next call asks the provider again
+      cache.set(key, { at: late ? Date.now() - ttl + 60000 : Date.now(), cs }); return cs;
+    } catch (e) { err = err || e; srcErr[sym + ':' + src] = e.message; errRun[sym + ':' + src] = (errRun[sym + ':' + src] || 0) + 1; }
   }
-  if (hit) return hit.cs; // better stale than nothing
+  if (hit) { hit.cs.fellBack = err ? err.message : 'provider failed'; return hit.cs; } // flagged, and the stale-data guard refuses to trade on it
   throw err;
 }
 function dropForming(cs, tf) {
@@ -174,7 +184,7 @@ async function getNews() {
 }
 
 /* ---------- economic calendar (free Forex Factory weekly JSON; high-impact USD, GBP, JPY) ---------- */
-let calEvents = [], calAt = 0, calStatus = { ok: false, err: 'not loaded yet' };
+let calEvents = [], calAt = 0, calFails = 0, calStatus = { ok: false, err: 'not loaded yet' };
 const calNum = x => { const v = parseFloat(String(x == null ? '' : x).replace(/[%,KkMmBb]/g, '')); return isFinite(v) ? v : null; };
 async function refreshCalendar(force) {
   if (!force && Date.now() - calAt < 6 * 3600000) return;
@@ -187,8 +197,8 @@ async function refreshCalendar(force) {
       const usd = x.country === 'USD', main = usd && (/^CPI y\/y$/i.test(x.title) || /^Non-Farm Employment Change$/i.test(x.title));
       return { name: (usd ? 'US ' : x.country + ' ') + x.title, t: Date.parse(x.date), bo: !main, forecast: calNum(x.forecast), previous: calNum(x.previous) };
     });
-    calStatus = { ok: true, n: calEvents.length, at: Date.now() };
-  } catch (e) { calStatus = { ok: false, err: String(e.message).slice(0, 80), at: Date.now() }; }
+    calStatus = { ok: true, n: calEvents.length, at: Date.now() }; calFails = 0;
+  } catch (e) { calFails++; calAt = Date.now() - 6 * 3600000 + 10 * 60000; calStatus = { ok: false, err: String(e.message).slice(0, 80), at: Date.now() }; }
 }
 function allEvents() {
   const stat = CFG.events.filter(e => !calEvents.some(c => Math.abs(c.t - e.t) < 3600000 || (!c.bo && MACRO.kindOf(c.name) && MACRO.kindOf(c.name) === MACRO.kindOf(e.name) && Math.abs(c.t - e.t) < 3 * 86400000)));
@@ -204,9 +214,10 @@ function lots(sym, entry, dist) {
 async function biasFor(sym) { try { return (await getNews()).bias[sym].bias; } catch (e) { return 'neutral'; } }
 async function analyse(sym, tf, mode) {
   curDec = (INSTR[sym] || { dec: 5 }).dec;
-  const cs = dropForming(await getCandles(sym, tf, 200), tf);
-  const sg = E.analyseAll(cs, tf, await biasFor(sym), mode || 'auto', CFG.minScore, false, eventNear(12));
-  return { sg, cs };
+  const raw = await getCandles(sym, tf, 200), cs = dropForming(raw, tf), fr = INTEL.freshness(sym, tf, cs, Date.now(), raw.fellBack);
+  const sg = E.analyseAll(cs, tf, await biasFor(sym), mode || CFG.stratMode || 'auto', CFG.minScore, false, eventNear(12));
+  if (fr.status === 'stale' && sg.dir !== 'WAIT') { sg.blockedStale = fr.reason; sg.dir = 'WAIT'; }
+  return { sg, cs, fr };
 }
 const num = (x, d) => Number(x).toFixed(d);
 function planLines(sym, p, d) {
@@ -239,9 +250,16 @@ async function ensureWebhook() {
   if (tgHook.ok || !CFG.tgToken) return;
   const base = (ENV.PUBLIC_URL || ENV.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
   if (!base) { tgHook = { ok: false, err: 'PUBLIC_URL is not set, so the Telegram buttons cannot reach the server. Use the Lock in buttons in the Auto tab instead, or add PUBLIC_URL.' }; return; }
-  try { const j = await tgCall('setWebhook', { url: base + '/tg', secret_token: TG_SECRET, allowed_updates: ['callback_query'] }); tgHook = j.ok ? { ok: true, url: base + '/tg' } : { ok: false, err: j.description || 'setWebhook failed' }; } catch (e) { tgHook = { ok: false, err: e.message }; }
+  try { const j = await tgCall('setWebhook', { url: base + '/tg', secret_token: TG_SECRET, allowed_updates: ['callback_query', 'message'] }); tgHook = j.ok ? { ok: true, url: base + '/tg' } : { ok: false, err: j.description || 'setWebhook failed' }; if (j.ok) await tgCall('setMyCommands', { commands: [['status', 'Data, server and storage health'], ['signal', 'Latest setup for a pair'], ['why', 'Reasons behind a setup'], ['best', 'Best strategy for each pair'], ['report', 'Today: what worked and failed'], ['paper', 'Paper trading record'], ['learn', 'What Chloe learned from mistakes'], ['news', 'Next events and CPI/NFP odds'], ['whatif', 'Test a scenario'], ['risk', 'Limits and the day so far'], ['validate', 'Test strategies on history'], ['pause', 'Stop alerts'], ['resume', 'Restart alerts'], ['help', 'List everything']].map(c => ({ command: c[0], description: c[1] })) }).catch(() => {}); } catch (e) { tgHook = { ok: false, err: e.message }; }
 }
 async function handleTg(update) {
+  const msg = update && update.message;
+  if (msg && msg.text) {
+    if (String(msg.chat && msg.chat.id) !== String(CFG.tgChat)) return; // only your own chat can talk to Chloe
+    await ready; const out = await runCommand(msg.text, true);
+    for (const part of INTEL.chunk(String(out))) await telegram(part);
+    return;
+  }
   const cq = update && update.callback_query; if (!cq || !cq.message) return;
   if (String(cq.message.chat && cq.message.chat.id) !== String(CFG.tgChat)) return; // only your own chat can answer
   const m = /^(ok|no):(\d+)$/.exec(cq.data || ''); if (!m) return;
@@ -253,11 +271,11 @@ async function handleTg(update) {
 
 /* ---------- paper-trade tracker: records each alerted signal and replays later candles ---------- */
 const PAPER_COST = { swing: 0.05, scalp: 0.1 }, PAPER_BARS = { swing: 30, scalp: 72 }, TPK = ['tp1', 'tp2', 'tp3'];
-function recordPaper(kind, sym, tf, sg, sigT, conf, strat) {
+function recordPaper(kind, sym, tf, sg, sigT, conf, strat, tags) {
   const P = state.paper, key = [sym, tf, sg.dir, strat, sigT].join('|');
   if (P.keys[key]) return false;
   P.keys[key] = Date.now();
-  P.trades.push({ id: ++P.seq, kind, sym, tf, dir: sg.dir, strat, conf, sigT, at: Date.now(), plan: { sl: sg.plan.sl, tps: sg.plan.tps.map(t => t.p), ref: sg.plan.entry }, status: 'open', fill: null, doneT: null, bars: 0, res: { tp1: null, tp2: null, tp3: null }, cost: PAPER_COST[kind] });
+  P.trades.push({ id: ++P.seq, kind, sym, tf, dir: sg.dir, strat, conf, sigT, at: Date.now(), plan: { sl: sg.plan.sl, tps: sg.plan.tps.map(t => t.p), ref: sg.plan.entry }, status: 'open', fill: null, doneT: null, bars: 0, res: { tp1: null, tp2: null, tp3: null }, cost: PAPER_COST[kind], tags: tags || null, mae: null, mfe: null });
   return true;
 }
 /* cs must hold closed candles only, oldest first. Mutates and returns the trade. */
@@ -277,6 +295,7 @@ function resolveTrade(t, cs) {
     if (c.t < t.fillT || (t.doneT && c.t <= t.doneT)) continue;
     t.bars++; t.doneT = c.t;
     const hitSL = sgn > 0 ? c.l <= sl : c.h >= sl;
+    { const adv = sgn > 0 ? t.fill - c.l : c.h - t.fill, fav = sgn > 0 ? c.h - t.fill : t.fill - c.l; t.mae = Math.max(t.mae || 0, Math.min(adv / t.dist, 1.2)); if (!hitSL) t.mfe = Math.max(t.mfe || 0, fav / t.dist); }
     TPK.forEach((x, i) => {
       if (t.res[x] !== null) return;
       const tp = t.plan.tps[i], hitTP = sgn > 0 ? c.h >= tp : c.l <= tp;
@@ -292,17 +311,21 @@ function resolveTrade(t, cs) {
 async function resolvePaper() {
   const P = state.paper, open = P.trades.filter(t => t.status !== 'closed'), groups = {};
   open.forEach(t => { (groups[t.sym + '|' + t.tf] = groups[t.sym + '|' + t.tf] || []).push(t); });
-  let closed = 0, errs = [];
+  let closed = 0, errs = [], fresh = [];
   for (const g of Object.keys(groups)) {
     const [sym, tf] = g.split('|');
     try {
       const cs = dropForming(await getCandles(sym, tf, groups[g][0].kind === 'scalp' ? 400 : 200), tf);
-      groups[g].forEach(t => { const was = t.status; resolveTrade(t, cs); if (was !== 'closed' && t.status === 'closed') closed++; });
+      groups[g].forEach(t => { const was = t.status; resolveTrade(t, cs); if (was !== 'closed' && t.status === 'closed') { closed++; fresh.push(t); } });
     } catch (e) { errs.push(g + ': ' + e.message); }
   }
   const cl = P.trades.filter(t => t.status === 'closed');
   if (cl.length > 400) { const drop = new Set(cl.slice(0, cl.length - 400).map(t => t.id)); P.trades = P.trades.filter(t => !drop.has(t.id)); }
   Object.keys(P.keys).forEach(k => { if (Date.now() - P.keys[k] > 20 * 86400000) delete P.keys[k]; });
+  const rv = fresh.filter(t => !t.void && !t.reviewed && typeof t.res.tp2 === 'number');
+  for (const t of rv.slice(0, 4)) { t.reviewed = true; const m = INTEL.reviewText(t, 'tp2'); if (m) await telegram(m); }
+  rv.slice(4).forEach(t => { t.reviewed = true; });
+  if (rv.length > 4) await telegram('CHLOE REVIEW: ' + (rv.length - 4) + ' more setups closed. They are in tonight\'s day report.');
   return { open: P.trades.filter(t => t.status !== 'closed').length, closedNow: closed, errors: errs };
 }
 function statsOf(rs) {
@@ -332,11 +355,115 @@ function paperLine() {
   return r.n ? 'Paper record (TP2): ' + r.n + ' closed, ' + Math.round(r.winRate * 100) + '% won, average ' + (r.avgR >= 0 ? '+' : '') + r.avgR.toFixed(2) + 'R' + (r.n < 30 ? ' (too few to trust yet)' : '') : 'Paper record: building, no closed trades yet';
 }
 
+/* ---------- monitoring: Telegram messages about the system itself, once per problem per cooldown ---------- */
+const nameOf = id => (E.STRATS.find(s => s.id === id) || { name: id }).name;
+function bump(k) {
+  const d = INTEL.dayKeyOf(Date.now(), CFG.tzOffset), c = (state.counts[d] = state.counts[d] || {}); c[k] = (c[k] || 0) + 1;
+  Object.keys(state.counts).sort().slice(0, -14).forEach(x => delete state.counts[x]);
+}
+async function watch(key, text) {
+  const last = state.alerts[key] || 0; if (Date.now() - last < CFG.alertCooldownMin * 60000) return false;
+  state.alerts[key] = Date.now(); return telegram('CHLOE WATCH: ' + text);
+}
+async function runStorageTest() {
+  const o = { upstash: !!(UP.url && UP.token), file: false, ok: false, durable: false, note: '', at: Date.now() };
+  try { fs.writeFileSync(STATE_FILE + '.t', 'x'); fs.unlinkSync(STATE_FILE + '.t'); o.file = true; } catch (e) { o.note = 'temp file not writable: ' + e.message; }
+  if (o.upstash) {
+    try { const v = String(Date.now()); await upstash(['SET', 'chloe_ping', v]); const g = await upstash(['GET', 'chloe_ping']); o.ok = g === v; o.durable = o.ok; o.note = o.ok ? 'Upstash write and read both worked, so records survive restarts' : 'Upstash answered but the value did not match'; }
+    catch (e) { o.ok = false; o.note = 'Upstash failed: ' + e.message; }
+  } else { o.ok = o.file; o.note = 'No Upstash set: records live in a temp file and are lost whenever Render restarts the server'; }
+  storageTest = o; return o;
+}
+const downNoted = {};
+async function monitorChecks() {
+  const out = [];
+  if (!state.bootNoted || state.bootNoted !== bootAt) {
+    if (Date.now() - bootAt < 15 * 60000) {
+      state.bootNoted = bootAt;
+      await watch('boot:' + bootAt, 'the server (re)started. Records loaded from: ' + loadedFrom + '. Storage: ' + (UP.url ? 'Upstash' : 'temp file, which Render wipes on restart') + '. Journal holds ' + state.paper.trades.length + ' paper trades.');
+      out.push('boot noted');
+    }
+  }
+  for (const k of Object.keys(errRun)) {
+    if (errRun[k] >= 3) { downNoted[k] = true; if (await watch('prov:' + k, 'data source problem for ' + k + ' (' + errRun[k] + ' failures in a row). Last error: ' + String(srcErr[k] || '').slice(0, 120) + '. Signals on that pair are paused if the data goes stale.')) out.push('alert ' + k); }
+    else if (errRun[k] === 0 && downNoted[k]) { delete downNoted[k]; state.alerts['prov:' + k] = 0; await telegram('CHLOE WATCH: data source ' + k + ' is working again.'); }
+  }
+  if (newsCache && newsCache.v.feeds_total && newsCache.v.feeds_ok === 0) await watch('feeds', 'none of the ' + newsCache.v.feeds_total + ' news feeds answered, so headline lean is blank.');
+  if (!calStatus.ok && calFails >= 3) await watch('calendar', 'the economic calendar has failed ' + calFails + ' times (' + (calStatus.err || '') + '). News blackouts fall back to the built-in CPI and NFP dates only.');
+  if (credits.day === today() && credits.n >= CFG.creditLimit * 0.9) await watch('credits', 'Twelve Data credits are at ' + credits.n + ' of ' + CFG.creditLimit + ' today. Data will fall back to Yahoo.');
+  if (UP.url && (storeErr || (storageTest && storageTest.ok === false))) await watch('storage', 'Upstash storage problem: ' + (storeErr || storageTest.note));
+  return out;
+}
+
+/* ---------- guards that run before any alert, paper trade or order ---------- */
+function gateFor(sym, tf, stratName, tags, fr) {
+  if (state.paused) { bump('paused'); return 'paused by you'; }
+  if (fr.status === 'stale') { bump('stale'); watch('stale:' + sym + ':' + tf, sym + ' ' + tf + ' data is stale (' + fr.reason + '). Alerts, paper trades and orders for it are blocked until fresh candles arrive.'); return 'stale data: ' + fr.reason; }
+  if (fr.status === 'closed') return 'market closed';
+  const lb = INTEL.learnBlock(state.rules, { sym, strat: stratName, tags });
+  if (lb) { bump('learned'); return 'your approved rule says ' + lb; }
+  return null;
+}
+
+/* ---------- long-history validation, run in the background one pair at a time ---------- */
+const VAL_SIZE = { M5: 4000, M15: 4000, H1: 3000, H4: 2000, D1: 1500 }, vq = [], vErr = {};
+let vRunning = false;
+function queueValidation(sym, tf, force) {
+  const k = sym + '|' + tf; if (!VAL_SIZE[tf]) return false;
+  if (!force && state.valid[k] && Date.now() - state.valid[k].at < 24 * 3600000) return false;
+  if (!vq.includes(k)) vq.push(k); pumpValidation(); return true;
+}
+async function pumpValidation() {
+  if (vRunning) return; vRunning = true;
+  try {
+    while (vq.length) {
+      const k = vq.shift(), [sym, tf] = k.split('|');
+      try {
+        const raw = await getCandles(sym, tf, VAL_SIZE[tf]), cs = dropForming(raw, tf); curDec = INSTR[sym].dec;
+        state.valid[k] = Object.assign(INTEL.validatePair(E, cs, tf, E.STRATS.map(s => s.id), { minScore: CFG.minScore, cost: ['M1', 'M5', 'M15'].includes(tf) ? 0.1 : 0.05 }), { sym, tf, source: lastSource[sym] || '' });
+        delete vErr[k]; await saveState();
+      } catch (e) { vErr[k] = e.message; }
+      await sleep(30);
+    }
+  } finally { vRunning = false; }
+}
+function validRow(sym, tf, stratName) { const v = state.valid[sym + '|' + tf]; return v ? v.rows.find(r => nameOf(r.id) === stratName) || null : null; }
+const provenFor = (sym, tf, stratName) => { const r = validRow(sym, tf, stratName); return !!(r && r.label === 'proven'); };
+function hitLine(sym, tf, stratName) {
+  const r = validRow(sym, tf, stratName), v = state.valid[sym + '|' + tf];
+  if (!r) { queueValidation(sym, tf); return 'Long-history record for this pair is still being worked out.'; }
+  return 'Setups like this (' + stratName + ' on ' + sym + ' ' + tf + ', ' + v.candles + ' candles): reached TP1 ' + INTEL.wilsonText(r.tp1) + '. Check: ' + r.label + ' (last 30% of history: ' + r.oos.n + ' trades, ' + INTEL.sgnR(r.oos.avgR) + ' average).';
+}
+function bestPerPair(tf) {
+  tf = tf || 'H4';
+  return PAIRS.map(sym => {
+    const v = state.valid[sym + '|' + tf], cl = state.paper.trades.filter(t => t.sym === sym && t.status === 'closed' && !t.void && typeof t.res.tp2 === 'number'), by = {};
+    cl.forEach(t => { (by[t.strat] = by[t.strat] || []).push(t.res.tp2); });
+    const live = Object.keys(by).map(k => Object.assign({ strat: k }, INTEL.stats(by[k]))).sort((a, b) => b.avgR - a.avgR);
+    return { sym, tf, checked: !!v, at: v ? v.at : null, candles: v ? v.candles : 0, from: v ? v.from : null, to: v ? v.to : null, line: INTEL.bestLine(sym, v, nameOf), best: v && v.rows[0] ? Object.assign({ name: nameOf(v.rows[0].id) }, v.rows[0]) : null, rows: v ? v.rows.map(r => Object.assign({ name: nameOf(r.id) }, r)) : [], live, error: vErr[sym + '|' + tf] || null };
+  });
+}
+
+/* ---------- daily report ---------- */
+function buildDayReport(now) {
+  now = now || Date.now();
+  const day = INTEL.dayKeyOf(now, CFG.tzOffset), L = INTEL.learn(state.paper.trades, 'tp2', state.rules);
+  return INTEL.dayReport({ trades: state.paper.trades, now, off: CFG.tzOffset, tp: 'tp2', counts: state.counts[day] || {}, pairs: PAIRS, bestLines: bestPerPair('H4').map(b => b.line), pendingLearn: L.suggestions.filter(s => s.status === 'pending').length });
+}
+async function sendDayReport(force) {
+  const day = INTEL.dayKeyOf(Date.now(), CFG.tzOffset);
+  if (!force && state.lastReport && state.lastReport.day === day) return { sent: false, note: 'already sent today' };
+  const r = buildDayReport(); let sent = true;
+  for (const part of INTEL.chunk(r.text)) sent = (await telegram(part)) && sent;
+  if (sent || force) { state.lastReport = { day, at: Date.now(), found: r.found, finished: r.finished }; await saveState(); }
+  return { sent, found: r.found, finished: r.finished };
+}
+
 /* ---------- jobs ---------- */
 async function dailySignal(force) {
   const rows = [];
   for (const sym of PAIRS) {
-    try { const a = await analyse(sym, 'H4'); rows.push({ sym, sg: a.sg }); } catch (e) { rows.push({ sym, err: e.message }); }
+    try { const a = await analyse(sym, 'H4'); if (a.fr.status === 'stale') { bump('stale'); rows.push({ sym, err: 'stale data: ' + a.fr.reason }); } else rows.push({ sym, sg: a.sg, closed: a.fr.status === 'closed' }); } catch (e) { rows.push({ sym, err: e.message }); }
   }
   const ok = rows.filter(r => r.sg), act = ok.filter(r => r.sg.dir !== 'WAIT').sort((a, b) => b.sg.conf - a.sg.conf);
   const ev = allEvents().filter(e => e.t > Date.now() && e.t < Date.now() + 36 * 3600000).map(e => e.name + ' at ' + new Date(e.t).toISOString().slice(11, 16) + ' UTC');
@@ -347,6 +474,7 @@ async function dailySignal(force) {
   } else {
     msg = ['CHLOE AI: NO TRADE TODAY', 'None of the five pairs passes the filters on H4.', ok.map(x => x.sym + ' lean ' + x.sg.lean + ' ' + x.sg.conf + '%').join(', '), ev.length ? 'Events soon: ' + ev.join(', ') : '', 'Waiting is a position.', paperLine()].filter(Boolean).join('\n');
   }
+  if (rows.some(r => r.err)) msg += '\nData problems: ' + rows.filter(r => r.err).map(r => r.sym + ' (' + r.err.slice(0, 60) + ')').join(', ') + '. Those pairs were not judged.';
   const sent = await telegram(msg);
   if (sent || force) { state.sod = { date: today(), txt: msg.split('\n')[1] }; saveState(); }
   return { sent, pick: act[0] ? act[0].sym + ' ' + act[0].sg.dir : 'none', errors: rows.filter(r => r.err).map(r => r.sym + ': ' + r.err) };
@@ -356,16 +484,22 @@ async function swingAlerts() {
   for (const item of CFG.watch) {
     const [sym, tf0] = item.split(':'), tf = (tf0 || 'H4').toUpperCase();
     try {
-      const { sg, cs } = await analyse(sym, tf);
-      const key = [sym, tf, sg.dir, sg.strat, cs[cs.length - 1].t].join('|');
+      const { sg, cs, fr } = await analyse(sym, tf); bump('scans');
+      const tags = INTEL.ctxTags({ dir: sg.lean || sg.dir, htf: sg.htf, newsNear: eventNear(2), conf: sg.conf, ms: Date.now() });
       let status = sg.dir;
-      if (sg.dir !== 'WAIT' && sg.conf >= CFG.minConf && recordPaper('swing', sym, tf, sg, cs[cs.length - 1].t, sg.conf, sg.stratName)) AUTO.offer({ kind: 'swing', sym, tf, dir: sg.dir, conf: sg.conf, strat: sg.stratName, plan: sg.plan });
-      if (sg.dir !== 'WAIT' && sg.conf >= CFG.minConf && !state.sent[key]) {
-        const d = INSTR[sym].dec;
-        const ok = await telegram(['CHLOE AI: POSSIBLE TRADE', sg.dir + ' ' + sym + ' ' + tf + ', ' + sg.conf + '% confidence', 'Strategy: ' + sg.stratName, ...planLines(sym, sg.plan, d), whyOf(sg.checks), DISCLAIMER].join('\n'));
-        if (ok) { state.sent[key] = Date.now(); status += ' (alert sent)'; }
-      }
-      out.push({ sym, tf, result: status, conf: sg.conf });
+      if (sg.dir !== 'WAIT' && sg.conf >= CFG.minConf) {
+        const block = gateFor(sym, tf, sg.stratName, tags, fr);
+        if (block) { out.push({ sym, tf, result: 'blocked: ' + block }); continue; }
+        bump('found');
+        const key = [sym, tf, sg.dir, sg.strat, cs[cs.length - 1].t].join('|');
+        if (recordPaper('swing', sym, tf, sg, cs[cs.length - 1].t, sg.conf, sg.stratName, Object.assign({}, tags, { htf: INTEL.ctxTags({ dir: sg.dir, htf: sg.htf, ms: Date.now() }).htf }))) { queueValidation(sym, tf); AUTO.offer({ kind: 'swing', sym, tf, dir: sg.dir, conf: sg.conf, strat: sg.stratName, plan: sg.plan, stale: null, proven: provenFor(sym, tf, sg.stratName) }); }
+        if (!state.sent[key]) {
+          const d = INSTR[sym].dec;
+          const ok = await telegram(['CHLOE AI: POSSIBLE TRADE', sg.dir + ' ' + sym + ' ' + tf + ', ' + sg.conf + '% confidence', 'Strategy: ' + sg.stratName, ...planLines(sym, sg.plan, d), whyOf(sg.checks), hitLine(sym, tf, sg.stratName), 'Data: newest closed candle ' + fr.ageMin + ' min old (' + fr.status + ')', DISCLAIMER].join('\n'));
+          if (ok) { state.sent[key] = Date.now(); status += ' (alert sent)'; }
+        }
+      } else if (fr.status === 'stale') { bump('stale'); gateFor(sym, tf, '', tags, fr); status = 'blocked: stale data'; }
+      out.push({ sym, tf, result: status, conf: sg.conf, fresh: fr.status });
     } catch (e) { out.push({ sym, tf, error: e.message }); }
   }
   return out;
@@ -377,23 +511,26 @@ async function scalpAlerts() {
     if (!E.inSession(sym, Date.now())) { out.push({ sym, tf, result: 'outside session' }); continue; }
     try {
       curDec = INSTR[sym].dec;
-      const cs = dropForming(await getCandles(sym, tf, 400), tf);
+      const raw = await getCandles(sym, tf, 400), cs = dropForming(raw, tf), fr = INTEL.freshness(sym, tf, cs, Date.now(), raw.fellBack); bump('scans');
+      if (fr.status === 'stale') { gateFor(sym, tf, '', {}, fr); out.push({ sym, tf, result: 'blocked: stale data', reason: fr.reason }); continue; }
       const a = E.scalpAnalyse(cs, tf, await biasFor(sym), o, sym, Date.now(), eventNear(2));
       let status = a.dir;
       if (a.ok && a.conf >= CFG.scalpMinConf) {
+        const tags = INTEL.ctxTags({ dir: a.dir, htf: E.htfTrend(cs, cs.length - 1, tf), newsNear: eventNear(2), conf: a.conf, ms: Date.now() }), block = gateFor(sym, tf, a.name, tags, fr);
+        if (block) { out.push({ sym, tf, result: 'blocked: ' + block }); continue; }
         const dayKey = sym + '|' + today(), key = ['S', sym, tf, a.dir, cs[cs.length - 1].t].join('|');
         const cool = Date.now() - (state.lastScalp[sym] || 0) < CFG.scalpCooldownMin * 60000;
         let fresh = false;
-        if (!cool && (state.scalpDay[dayKey] || 0) < CFG.scalpMaxPerDay && recordPaper('scalp', sym, tf, { dir: a.dir, plan: a.plan }, cs[cs.length - 1].t, a.conf, a.name)) {
-          fresh = true; AUTO.offer({ kind: 'scalp', sym, tf, dir: a.dir, conf: a.conf, strat: a.name, plan: a.plan }); state.lastScalp[sym] = Date.now(); state.scalpDay[dayKey] = (state.scalpDay[dayKey] || 0) + 1;
+        if (!cool && (state.scalpDay[dayKey] || 0) < CFG.scalpMaxPerDay && recordPaper('scalp', sym, tf, { dir: a.dir, plan: a.plan }, cs[cs.length - 1].t, a.conf, a.name, tags)) {
+          fresh = true; bump('found'); queueValidation(sym, tf); AUTO.offer({ kind: 'scalp', sym, tf, dir: a.dir, conf: a.conf, strat: a.name, plan: a.plan, stale: null, proven: provenFor(sym, tf, a.name) }); state.lastScalp[sym] = Date.now(); state.scalpDay[dayKey] = (state.scalpDay[dayKey] || 0) + 1;
         }
         if (fresh && !state.sent[key]) {
           const d = INSTR[sym].dec;
-          const ok = await telegram(['CHLOE AI: SCALP', a.dir + ' ' + sym + ' ' + tf + ', ' + a.conf + '% confidence', 'Strategy: ' + a.name, ...planLines(sym, a.plan, d), 'History on these candles: ' + a.stats.n + ' trades, ' + (a.stats.n ? Math.round(a.stats.w / a.stats.n * 100) + '% won' : 'none'), whyOf(a.checks), 'Scalps are fast and spread matters. ' + DISCLAIMER].join('\n'));
+          const ok = await telegram(['CHLOE AI: SCALP', a.dir + ' ' + sym + ' ' + tf + ', ' + a.conf + '% confidence', 'Strategy: ' + a.name, ...planLines(sym, a.plan, d), 'History on these candles: ' + a.stats.n + ' trades, ' + (a.stats.n ? Math.round(a.stats.w / a.stats.n * 100) + '% won' : 'none'), hitLine(sym, tf, a.name), whyOf(a.checks), 'Scalps are fast and spread matters. ' + DISCLAIMER].join('\n'));
           if (ok) { state.sent[key] = Date.now(); status += ' (alert sent)'; }
         }
       }
-      out.push({ sym, tf, result: status, conf: a.conf });
+      out.push({ sym, tf, result: status, conf: a.conf, fresh: fr.status });
     } catch (e) { out.push({ sym, tf, error: e.message }); }
   }
   return out;
@@ -404,15 +541,172 @@ async function runJobs(mode) {
   await ensureWebhook().catch(() => {});
   if (mode === 'test') { res.sent = await telegram('CHLOE AI: test alert. Your phone alerts are working.'); if (!res.sent) res.note = 'Telegram token or chat id is missing or wrong'; return res; }
   if (mode === 'day') { res.day = await dailySignal(true); await saveState(); return res; }
+  if (mode === 'report') { res.report = await sendDayReport(true); return res; }
+  if (mode === 'validate') { PAIRS.forEach(sym => queueValidation(sym, 'H4', true)); res.queued = vq.slice(); return res; }
   const all = !mode || mode === 'all';
   if (mode === 'paper') { res.paper = await resolvePaper(); await saveState(); return res; }
   if ((all || mode === 'sod') && new Date().getUTCHours() >= CFG.sodHour && (!state.sod || state.sod.date !== today())) res.day = await dailySignal(false);
   if (all || mode === 'swing') res.swing = await swingAlerts();
   if (all || mode === 'scalp') res.scalp = await scalpAlerts();
   res.paper = await resolvePaper();
+  if (all) {
+    PAIRS.forEach(sym => queueValidation(sym, 'H4')); CFG.scalpWatch.forEach(it => { const [sy, tf] = it.split(':'); queueValidation(sy, (tf || 'M5').toUpperCase()); });
+    const lh = new Date(Date.now() + CFG.tzOffset * 3600000).getUTCHours();
+    if (lh >= CFG.reportHourLocal) res.report = await sendDayReport(false);
+    res.monitor = await monitorChecks();
+  }
   Object.keys(state.sent).forEach(k => { if (Date.now() - state.sent[k] > 3 * 86400000) delete state.sent[k]; });
   await saveState();
   return res;
+}
+
+/* ---------- ask Chloe: commands from Telegram and from the page ---------- */
+function ageOf(sym, tf) { // from the cache only, never fetches
+  const hit = [200, 400].map(n => cache.get(sym + '|' + tf + '|' + n)).filter(Boolean).sort((a, b) => b.at - a.at)[0];
+  if (!hit) return null;
+  return Object.assign({ source: lastSource[sym] || '' }, INTEL.freshness(sym, tf, dropForming(hit.cs, tf), Date.now(), hit.cs.fellBack));
+}
+const frText = fr => fr.status === 'closed' ? 'market closed (last candle ' + fr.last + ')' : fr.status + ', newest closed candle ' + fr.ageMin + ' min old' + (fr.status === 'stale' ? ' (' + fr.reason + ')' : '');
+async function cmdStatus() {
+  const items = CFG.watch.concat(CFG.scalpWatch), L = ['CHLOE STATUS', 'Alerts and new paper trades: ' + (state.paused ? 'PAUSED by you (send /resume)' : 'running')];
+  for (const it of items) { const [sym, tf0] = it.split(':'), tf = (tf0 || 'H4').toUpperCase(); try { const raw = await getCandles(sym, tf, 200); L.push('Data ' + sym + ' ' + tf + ': ' + frText(INTEL.freshness(sym, tf, dropForming(raw, tf), Date.now(), raw.fellBack)) + ', from ' + (lastSource[sym] || '?')); } catch (e) { L.push('Data ' + sym + ' ' + tf + ': ERROR ' + String(e.message).slice(0, 80)); } }
+  const n = newsCache ? newsCache.v : null;
+  L.push('News feeds: ' + (n ? n.feeds_ok + ' of ' + n.feeds_total : 'not read yet') + '. Calendar: ' + (calStatus.ok ? calStatus.n + ' events' : 'DOWN (' + (calStatus.err || '') + ')') + '.');
+  L.push('Storage: ' + storageTest.note + '.');
+  L.push('Twelve Data credits today: ' + (credits.day === today() ? credits.n : 0) + ' of ' + CFG.creditLimit + '. Strategy: ' + nameOf(CFG.stratMode) + '.');
+  L.push(paperLine());
+  const ok = Object.keys(state.valid).length; L.push('Long-history checks done: ' + ok + (vq.length ? ', ' + vq.length + ' waiting' : '') + '.');
+  return L.join('\n');
+}
+async function cmdSignal(sym, tf) {
+  const { sg, fr } = await analyse(sym, tf), d = INSTR[sym].dec;
+  if (fr.status === 'stale') return 'CHLOE: I will not judge ' + sym + ' ' + tf + ' right now. ' + frText(fr) + '.';
+  if (sg.dir === 'WAIT') return ['CHLOE: no setup on ' + sym + ' ' + tf + ' now.', 'Leaning ' + sg.lean + ' at ' + sg.conf + '% but the filters do not pass.', sg.why, 'Data: ' + frText(fr) + '.'].join('\n');
+  return ['CHLOE: ' + sg.dir + ' ' + sym + ' ' + tf + ', ' + sg.conf + '% confidence', 'Strategy: ' + sg.stratName, ...planLines(sym, sg.plan, d), whyOf(sg.checks), hitLine(sym, tf, sg.stratName), 'Data: ' + frText(fr) + '.', DISCLAIMER].join('\n');
+}
+function cmdWhyPast(symOrNull) {
+  const list = state.paper.trades.filter(t => (!symOrNull || t.sym === symOrNull) && t.status === 'closed' && !t.void && typeof t.res.tp2 === 'number').slice(-4).reverse();
+  if (!list.length) return 'No finished paper setups' + (symOrNull ? ' on ' + symOrNull : '') + ' yet, so there is nothing to explain.';
+  return ['CHLOE WHY: last finished setups' + (symOrNull ? ' on ' + symOrNull : '')].concat(list.map(t => { const c = INTEL.causeOf(t, 'tp2'); return '- ' + t.dir + ' ' + t.sym + ' ' + t.tf + ' (' + t.strat + ', ' + t.conf + '%): ' + INTEL.sgnR(t.res.tp2) + '. ' + (c.win ? 'Worked: ' : 'Failed: ') + c.why.join('; ') + '.'; })).join('\n');
+}
+async function cmdWhy(sym, tf) {
+  const { sg, fr } = await analyse(sym, tf), L = ['CHLOE WHY: ' + sym + ' ' + tf + ' (' + frText(fr) + ')', sg.why + '.'];
+  const pass = sg.checks.filter(c => c[1]).map(c => c[0]), miss = sg.checks.filter(c => !c[1]).map(c => c[0]);
+  if (pass.length) L.push('Passing: ' + pass.join('; ')); if (miss.length) L.push('Missing: ' + miss.join('; '));
+  L.push('Strategies voting: ' + sg.buys + ' buy, ' + sg.sells + ' sell.');
+  const last = state.paper.trades.filter(t => t.sym === sym && t.status === 'closed' && !t.void && typeof t.res.tp2 === 'number').slice(-1)[0];
+  if (last) { const c = INTEL.causeOf(last, 'tp2'); L.push('Last closed ' + sym + ' setup: ' + last.dir + ' ' + last.strat + ' ' + INTEL.sgnR(last.res.tp2) + '. ' + (c.win ? 'Worked: ' : 'Failed: ') + c.why.join('; ') + '.'); }
+  return L.join('\n');
+}
+function cmdRisk() {
+  const st = AUTO.status(), p = st.plan, L = ['CHLOE RISK', 'Alert sizing: ' + CFG.riskPct + '% of ' + CFG.balance + ' per setup.'];
+  L.push('Auto plan: ' + p.name + ', risk ' + p.effRisk + '% per trade, max ' + p.maxOpen + ' open, ' + p.maxDay + ' a day, day loss stop ' + p.dayLoss + '%, week ' + p.weekLoss + '%, drawdown stop ' + p.ddStop + '%.');
+  L.push('Auto is ' + (st.cfg.enabled ? 'ON' : 'off') + ' in ' + st.cfg.mode + ' mode' + (st.cfg.killed ? ', KILL SWITCH ON' : '') + '. MT5 helper ' + (st.connected ? 'connected' : 'offline') + '.');
+  if (st.account) L.push('Account: balance ' + st.account.balance + ', equity ' + st.account.equity + '. Day ' + (st.day ? st.day.pct + '%' : 'n/a') + ', drawdown from peak ' + st.drawdownPct + '%.');
+  L.push('Blocks before any order: stale data, paused, news blackout, loss limits, three losses in a row, and on a live account the strategy must be proven.');
+  return L.join('\n');
+}
+async function cmdNews() {
+  const f = await forecasts(), n = await getNews().catch(() => null), L = ['CHLOE NEWS'];
+  const ev = allEvents().filter(e => e.t > Date.now() && e.t < Date.now() + 7 * 86400000).sort((a, b) => a.t - b.t).slice(0, 6);
+  L.push(ev.length ? 'Coming up: ' + ev.map(e => e.name + ' ' + new Date(e.t).toISOString().slice(5, 16).replace('T', ' ') + ' UTC').join('; ') : 'No big releases in the next 7 days.');
+  f.events.filter(e => e.left > 0).slice(0, 2).forEach(e => L.push(e.kind + ' odds: above ' + e.above + '%, in line ' + e.inline + '%, below ' + e.below + '% (lean: ' + e.pick + ', confidence ' + e.confidence + '). ' + (e.cons != null ? 'Forecast ' + e.cons + '.' : '')));
+  if (n) L.push('Headline lean: ' + PAIRS.map(s => s + ' ' + n.bias[s].bias).join(', '));
+  return L.join('\n');
+}
+function cmdPaper() {
+  const r = paperReport('tp2'), L = ['CHLOE PAPER RECORD', paperLine()];
+  ['tp1', 'tp2', 'tp3'].forEach(k => { const s = r.byTarget[k]; if (s.n) L.push(k.toUpperCase() + ': ' + s.n + ' closed, ' + Math.round(s.winRate * 100) + '% won, ' + INTEL.sgnR(s.avgR) + ' average, profit factor ' + INTEL.round(s.pf)); });
+  r.byStrategy.slice(0, 5).forEach(x => L.push('- ' + x.key + ': ' + x.n + ' trades, ' + Math.round(x.winRate * 100) + '% won, ' + INTEL.sgnR(x.avgR)));
+  L.push('Open now: ' + r.open + '. Proof gate: ' + r.gate.map(g => (g.ok ? 'PASS ' : 'not yet ') + g.text + ' (' + g.now + ')').join('; '));
+  return L.join('\n');
+}
+function cmdLearn(args, control) {
+  const L = INTEL.learn(state.paper.trades, 'tp2', state.rules);
+  if ((args[0] === 'approve' || args[0] === 'reject') && args[1]) {
+    if (!control) return 'Changing rules needs your admin token or your Telegram chat.';
+    const s = L.suggestions[+args[1] - 1]; if (!s) return 'There is no suggestion number ' + args[1] + '. Send /learn to see the list.';
+    state.rules[s.id] = { status: args[0] === 'approve' ? 'approved' : 'rejected', at: Date.now() }; saveState();
+    return args[0] === 'approve' ? 'Done. From now on Chloe will ' + INTEL.ruleText(s.id) + '. Send /learn reject ' + args[1] + ' to undo it.' : 'Rejected. Chloe will not change anything for that one.';
+  }
+  const out = ['CHLOE LEARNING', L.closed + ' closed setups so far. ' + (L.ready ? '' : 'Suggestions start at ' + INTEL.LEARN_MIN + ' (' + L.need + ' to go), so nothing is suggested yet.')];
+  if (L.lossCauses.length) out.push('Why setups failed: ' + L.lossCauses.slice(0, 4).map(c => c.cause + ' (' + c.n + ')').join('; ') + '.');
+  L.suggestions.forEach((s, i) => out.push((i + 1) + '. [' + s.status + '] ' + s.text + (s.status === 'pending' ? ' Reply /learn approve ' + (i + 1) + ' or /learn reject ' + (i + 1) + '.' : '')));
+  L.notes.slice(0, 3).forEach(x => out.push(x));
+  Object.keys(state.rules).filter(id => state.rules[id].status === 'approved').forEach(id => out.push('Active rule: ' + INTEL.ruleText(id) + '.'));
+  return out.join('\n');
+}
+function cmdValidate(sym, tf) {
+  const v = state.valid[sym + '|' + tf];
+  if (!v) { queueValidation(sym, tf, true); return 'CHLOE: checking ' + sym + ' ' + tf + ' on long history now. Ask again in a minute.'; }
+  const L = ['CHLOE VALIDATE: ' + sym + ' ' + tf + ', ' + v.candles + ' candles from ' + v.from.slice(0, 10) + ' to ' + v.to.slice(0, 10), 'Each strategy is run on the first 70% then judged on the last 30% it never saw. Proven needs ' + INTEL.PROVEN.oosN + '+ trades there, profit factor ' + INTEL.PROVEN.pf + '+ and a positive average.'];
+  v.rows.forEach(r => L.push('- ' + nameOf(r.id) + ': ' + r.label.toUpperCase() + ', last 30%: ' + r.oos.n + ' trades, PF ' + INTEL.round(r.oos.pf) + ', ' + INTEL.sgnR(r.oos.avgR) + '; TP1 reached ' + INTEL.wilsonText(r.tp1)));
+  L.push('Caution: 7 strategies on 5 pairs is 35 tries, so a couple will pass by luck. Only the live paper record confirms an edge.');
+  return L.join('\n');
+}
+function cmdBest(tf) {
+  const L = ['CHLOE BEST STRATEGY PER PAIR (' + tf + ', long history)'];
+  bestPerPair(tf).forEach(b => { L.push(b.line); if (b.live.length) L.push('   live paper: ' + b.live.slice(0, 2).map(x => x.strat + ' ' + x.n + ' trades ' + INTEL.sgnR(x.avgR)).join('; ')); });
+  const miss = PAIRS.filter(s => !state.valid[s + '|' + tf]); if (miss.length) { miss.forEach(s => queueValidation(s, tf)); L.push('Still checking: ' + miss.join(', ') + '. Ask again in a few minutes.'); }
+  return L.join('\n');
+}
+async function cmdWhatIf(args, symHint) {
+  const txt = args.join(' ').toLowerCase(), kind = /cpi|inflation/.test(txt) ? 'CPI' : /nfp|payroll/.test(txt) ? 'NFP' : null;
+  if (kind) {
+    const ev = (await forecasts()).events.find(e => e.kind === kind && e.left > -3600000);
+    if (!ev) return 'I cannot see an upcoming ' + kind + ' release in the calendar right now.';
+    const want = /hot|above|high|strong|beat|up\b/.test(txt) ? 'above' : /cool|below|low|weak|miss|soft|down\b/.test(txt) ? 'below' : /in ?line|match|expected/.test(txt) ? 'in line' : null;
+    const odds = { above: ev.above, 'in line': ev.inline, below: ev.below };
+    const usd = o => o === 'above' ? 1 : o === 'below' ? -1 : 0;
+    const L = ['CHLOE WHAT IF: ' + ev.name + ' (' + new Date(ev.t).toISOString().slice(0, 16).replace('T', ' ') + ' UTC)'];
+    (want ? [want] : ['above', 'in line', 'below']).forEach(o => {
+      const u = usd(o);
+      L.push((o === 'above' ? 'Above forecast' : o === 'below' ? 'Below forecast' : 'In line') + ' (about ' + odds[o] + '% likely): ' + (u === 0 ? 'little change, price often drifts back to the trend' : 'USD ' + (u > 0 ? 'stronger' : 'weaker') + ', so ' + PAIRS.map(s => s + ' ' + (USD_DIR[s] * u > 0 ? 'up' : 'down')).join(', ')));
+    });
+    L.push('What Chloe does either way: no new setups from 30 minutes before to 15 minutes after the release, then only on freshly closed candles that pass the stale-data check. These odds are a rules model, not a backtested one.');
+    return L.join('\n');
+  }
+  const sym = symHint || PAIRS.find(s => txt.includes(s.toLowerCase())), m = /([-+]?\d+(?:\.\d+)?)/.exec(txt);
+  if (!sym || !m) return 'Try: /whatif cpi hot, /whatif nfp weak, or /whatif gold -1.5 (a percent move).';
+  const raw = await getCandles(sym, 'H1', 100), cs = dropForming(raw, 'H1'), fr = INTEL.freshness(sym, 'H1', cs, Date.now(), raw.fellBack), price = cs[cs.length - 1].c, pc = +m[1], np = price * (1 + pc / 100), I = INSTR[sym], f = x => Number(x).toFixed(I.dec);
+  const pips = (np - price) / I.pip, perLot = pips * I.pv(price), L = ['CHLOE WHAT IF: ' + sym + ' moves ' + (pc >= 0 ? '+' : '') + pc + '%', 'From ' + f(price) + ' to ' + f(np) + ' (' + Math.abs(Math.round(pips)) + ' pips). One lot would ' + (perLot >= 0 ? 'make' : 'lose') + ' about ' + Math.abs(Math.round(perLot)) + ' on a long and the opposite on a short.', 'Price used: ' + frText(fr) + '.'];
+  const open = state.paper.trades.filter(t => t.sym === sym && t.status !== 'closed' && t.fill);
+  open.forEach(t => { const sg = t.dir === 'BUY' ? 1 : -1, r = (np - t.fill) * sg / t.dist; L.push('Open paper ' + t.dir + ' ' + t.strat + ': ' + (r <= -1 ? 'stop hit, ' : (np - t.plan.tps[0]) * sg >= 0 ? 'TP1 reached, ' : '') + INTEL.sgnR(Math.max(-1, r))); });
+  if (!open.length) L.push('No open paper trades on ' + sym + ' to test.');
+  return L.join('\n');
+}
+async function llmAsk(text) {
+  if (!CFG.llmKey) return null;
+  const d = today(); state.llmUse = state.llmUse && state.llmUse.day === d ? state.llmUse : { day: d, n: 0 };
+  if (state.llmUse.n >= CFG.llmDaily) return 'I have used my ' + CFG.llmDaily + ' free-form answers for today. The commands in /help still work.';
+  state.llmUse.n++;
+  try {
+    const ctx = [await cmdStatus(), cmdPaper(), cmdLearn([], false), cmdBest('H4')].join('\n\n');
+    const r = await doFetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': CFG.llmKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify({ model: CFG.llmModel, max_tokens: 400, system: 'You are Chloe, a trading assistant. Answer in plain English in under 120 words using ONLY the data given. Never tell the user to place a specific trade and never promise profit. If the data does not answer the question, say so and name the command that might (/signal, /report, /best, /paper, /learn).', messages: [{ role: 'user', content: 'DATA:\n' + ctx + '\n\nQUESTION: ' + text }] }) });
+    const j = await r.json(); return j && j.content && j.content[0] && j.content[0].text ? j.content[0].text : null;
+  } catch (e) { return null; }
+}
+async function runCommand(text, control) {
+  const q = CHAT.parse(text), sym = q.sym || 'XAUUSD', tf = q.tf || 'H4';
+  try {
+    switch (q.cmd) {
+      case 'help': return CHAT.HELP;
+      case 'status': return await cmdStatus();
+      case 'signal': return await cmdSignal(sym, tf);
+      case 'why': return /\b(los[et]|lose|fail|stopp|wrong|won|worked|win|went)/.test(q.raw.toLowerCase()) ? cmdWhyPast(q.sym) : await cmdWhy(sym, tf);
+      case 'risk': return cmdRisk();
+      case 'news': return await cmdNews();
+      case 'paper': return cmdPaper();
+      case 'learn': return cmdLearn(q.args, control);
+      case 'validate': return cmdValidate(sym, tf);
+      case 'best': return cmdBest(q.tf || 'H4');
+      case 'report': return buildDayReport().text;
+      case 'whatif': return await cmdWhatIf(q.args, q.sym);
+      case 'pause': if (!control) return 'Pausing needs your admin token or your Telegram chat.'; state.paused = true; await saveState(); return 'Paused. No alerts or new paper trades until you send /resume. Open paper trades still get tracked.';
+      case 'resume': if (!control) return 'Resuming needs your admin token or your Telegram chat.'; state.paused = false; await saveState(); return 'Running again.';
+      default: { const a = await llmAsk(q.raw); return a || (q.raw.startsWith('/') ? 'I do not know that command.\n\n' : 'I did not catch that. ') + CHAT.HELP; }
+    }
+  } catch (e) { return 'Something went wrong: ' + String(e.message).slice(0, 160); }
 }
 
 /* ---------- MT5 account, read only, through MetaApi ---------- */
@@ -451,22 +745,23 @@ const send = (res, code, obj) => { const b = JSON.stringify(obj); res.writeHead(
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x'), p = u.pathname, q = u.searchParams;
   try {
+    if (p.startsWith('/api') || p === '/run') await ready;
     const ASSET = { '/icon.svg': 'image/svg+xml', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png', '/maskable-512.png': 'image/png', '/apple-touch-icon.png': 'image/png', '/manifest.webmanifest': 'application/manifest+json', '/sw.js': 'application/javascript' };
     if (ASSET[p]) { const fp = path.join(STATIC_DIR, p.slice(1)); if (!fs.existsSync(fp)) { res.writeHead(404, { 'content-type': 'application/json' }); return res.end('{"error":"file missing on server: ' + p.slice(1) + '"}'); } res.writeHead(200, { 'content-type': ASSET[p], 'cache-control': p === '/sw.js' ? 'no-cache' : 'public, max-age=86400' }); return res.end(fs.readFileSync(fp)); }
     if (p === '/' || p === '/index.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(path.join(STATIC_DIR, 'index.html'))); }
     if (p === '/health') {
       const n = newsCache ? newsCache.v : { feeds_ok: 0, feeds_total: CFG.feeds.length };
-      return send(res, 200, { ok: true, twelve_data_key: !!CFG.tdKey, telegram: !!(CFG.tgToken && CFG.tgChat), metaapi: !!(CFG.maToken && CFG.maAcc), btc_source: lastSource.BTCUSD || CFG.btcSource, credits_today: credits.day === today() ? credits.n : 0, credit_limit: CFG.creditLimit, sod_hour_utc: CFG.sodHour, last_sod: state.sod ? state.sod.date + ': ' + state.sod.txt : null, feeds_ok: n.feeds_ok, feeds_total: n.feeds_total, feeds: n.feeds || {}, data_order: CFG.dataOrder, last_sources: lastSource, source_errors: srcErr, calendar: calStatus, tg_buttons: tgHook, watch: CFG.watch, scalp_watch: CFG.scalpWatch, storage: UP.url ? 'upstash' : 'temp file (may reset on restart)', storage_error: storeErr, paper_open: state.paper.trades.filter(t => t.status !== 'closed').length, paper_closed: state.paper.trades.filter(t => t.status === 'closed').length });
+      return send(res, 200, { ok: true, twelve_data_key: !!CFG.tdKey, telegram: !!(CFG.tgToken && CFG.tgChat), metaapi: !!(CFG.maToken && CFG.maAcc), btc_source: lastSource.BTCUSD || CFG.btcSource, credits_today: credits.day === today() ? credits.n : 0, credit_limit: CFG.creditLimit, sod_hour_utc: CFG.sodHour, last_sod: state.sod ? state.sod.date + ': ' + state.sod.txt : null, feeds_ok: n.feeds_ok, feeds_total: n.feeds_total, feeds: n.feeds || {}, data_order: CFG.dataOrder, last_sources: lastSource, source_errors: srcErr, calendar: calStatus, tg_buttons: tgHook, watch: CFG.watch, scalp_watch: CFG.scalpWatch, strategy: CFG.stratMode, storage: UP.url ? 'upstash' : 'temp file (may reset on restart)', storage_error: storeErr, data_age: Object.fromEntries(CFG.watch.concat(CFG.scalpWatch).map(it => { const [sy, tf] = it.split(':'); return [it, ageOf(sy, (tf || 'H4').toUpperCase())]; })), storage_test: storageTest, paused: !!state.paused, uptime_min: Math.round((Date.now() - bootAt) / 60000), loaded_from: loadedFrom, validated: Object.keys(state.valid), last_report: state.lastReport || null, llm: !!CFG.llmKey, paper_open: state.paper.trades.filter(t => t.status !== 'closed').length, paper_closed: state.paper.trades.filter(t => t.status === 'closed').length });
     }
     if (p === '/api/candles') {
       const sym = (q.get('symbol') || 'XAUUSD').toUpperCase(), tf = (q.get('tf') || 'H4').toUpperCase();
-      const cs = await getCandles(sym, tf, +q.get('size') || 200);
-      return send(res, 200, { symbol: sym, tf, candles: cs, fetched_at: Math.floor(Date.now() / 1000), source: lastSource[sym] || 'td' });
+      const cs = await getCandles(sym, tf, Math.min(500, +q.get('size') || 200)), fr = INTEL.freshness(sym, tf, dropForming(cs, tf), Date.now(), cs.fellBack);
+      return send(res, 200, { symbol: sym, tf, candles: cs, fetched_at: Math.floor(Date.now() / 1000), source: lastSource[sym] || 'td', fresh: fr });
     }
     if (p === '/api/signal') {
       const sym = (q.get('symbol') || 'XAUUSD').toUpperCase(), tf = (q.get('tf') || 'H4').toUpperCase();
-      const { sg } = await analyse(sym, tf, q.get('mode') || 'auto');
-      return send(res, 200, { symbol: sym, tf, dir: sg.dir, strategy: sg.stratName, confidence: sg.conf, plan: sg.plan, checks: sg.checks, why: sg.why });
+      const { sg, fr } = await analyse(sym, tf, q.get('mode') || 'auto'), row = validRow(sym, tf, sg.stratName);
+      return send(res, 200, { symbol: sym, tf, dir: sg.dir, strategy: sg.stratName, confidence: sg.conf, plan: sg.plan, checks: sg.checks, why: sg.why, fresh: fr, blocked: sg.blockedStale || null, hit: hitLine(sym, tf, sg.stratName), hit_stats: row ? { tp1: row.tp1, label: row.label, oos: row.oos } : null });
     }
     if (p === '/ea/poll' && req.method === 'POST') {
       let b = null; try { b = JSON.parse(await readBody(req)); } catch (e) {}
@@ -475,7 +770,8 @@ const server = http.createServer(async (req, res) => {
     if (p === '/tg' && req.method === 'POST') {
       if (req.headers['x-telegram-bot-api-secret-token'] !== TG_SECRET) return send(res, 403, { error: 'no' });
       let u = {}; try { u = JSON.parse(await readBody(req)); } catch (e) {}
-      await ready; await handleTg(u).catch(() => {}); return send(res, 200, { ok: true });
+      await ready; if (u.message) { send(res, 200, { ok: true }); handleTg(u).catch(() => {}); return; }
+      await handleTg(u).catch(() => {}); return send(res, 200, { ok: true });
     }
     if (p.startsWith('/api/auto')) {
       if (!AUTO.isAdmin(req.headers['x-admin'] || q.get('token'))) return send(res, 403, { error: 'admin token needed' });
@@ -494,6 +790,32 @@ const server = http.createServer(async (req, res) => {
       const f = state.forecasts[b.id]; if (!f) return send(res, 404, { error: 'no saved forecast with that id' });
       f.actual = +b.actual; f.outcome = MACRO.outcome(f, f.actual); f.hit = f.outcome === f.pick; await saveState(); return send(res, 200, { ok: true, outcome: f.outcome, hit: f.hit });
     }
+    if (p === '/api/ask' && req.method === 'POST') {
+      let b = {}; try { b = JSON.parse(await readBody(req) || '{}'); } catch (e) {}
+      const ctl = AUTO.isAdmin(req.headers['x-admin'] || q.get('token'));
+      return send(res, 200, { ok: true, text: await runCommand(String(b.text || ''), ctl), control: ctl });
+    }
+    if (p === '/api/learn' && req.method === 'GET') return send(res, 200, INTEL.learn(state.paper.trades, 'tp2', state.rules));
+    if (p === '/api/learn/decide' && req.method === 'POST') {
+      if (!AUTO.isAdmin(req.headers['x-admin'] || q.get('token'))) return send(res, 403, { error: 'admin token needed' });
+      let b = {}; try { b = JSON.parse(await readBody(req) || '{}'); } catch (e) {}
+      const s = INTEL.learn(state.paper.trades, 'tp2', state.rules).suggestions.find(x => x.id === b.id); if (!s) return send(res, 404, { error: 'no such suggestion' });
+      if (!['approved', 'rejected', 'pending'].includes(b.status)) return send(res, 400, { error: 'status must be approved, rejected or pending' });
+      if (b.status === 'pending') delete state.rules[b.id]; else state.rules[b.id] = { status: b.status, at: Date.now() };
+      await saveState(); return send(res, 200, { ok: true });
+    }
+    if (p === '/api/validate') {
+      const tf = (q.get('tf') || 'H4').toUpperCase(); if (!VAL_SIZE[tf]) return send(res, 400, { error: 'Unsupported timeframe for validation' });
+      if (q.get('refresh') === '1') { if (!AUTO.isAdmin(req.headers['x-admin'] || q.get('token'))) return send(res, 403, { error: 'admin token needed' }); PAIRS.forEach(sy => queueValidation(sy, tf, true)); }
+      else PAIRS.forEach(sy => queueValidation(sy, tf));
+      return send(res, 200, { tf, pairs: bestPerPair(tf), waiting: vq.slice(), running: vRunning, rule: INTEL.PROVEN, note: 'Each strategy is run on the first 70% of the history, then judged on the last 30% it was not tuned on. With many strategies and pairs a few pass by luck, so the paper record has the final say.' });
+    }
+    if (p === '/api/report') {
+      if (q.get('send') === '1') { if (!AUTO.isAdmin(req.headers['x-admin'] || q.get('token'))) return send(res, 403, { error: 'admin token needed' }); return send(res, 200, await sendDayReport(true)); }
+      return send(res, 200, buildDayReport());
+    }
+    if (p === '/api/hit') { const sy = (q.get('symbol') || 'XAUUSD').toUpperCase(), tf = (q.get('tf') || 'H4').toUpperCase(), st = q.get('strategy') || '', r = /^[A-Z]{6}$|^USTEC$/.test(sy) ? validRow(sy, tf, st) : null; return send(res, 200, { line: /^[A-Z]{6}$|^USTEC$/.test(sy) ? hitLine(sy, tf, st) : '', label: r ? r.label : null }); }
+    if (p === '/api/storage-test') return send(res, 200, await runStorageTest());
     if (p === '/api/news') return send(res, 200, await getNews());
     if (p === '/api/paper') return send(res, 200, paperReport(q.get('tp') ? 'tp' + q.get('tp') : 'tp2'));
     if (p === '/api/broker') return send(res, 200, await broker());
@@ -505,4 +827,4 @@ const server = http.createServer(async (req, res) => {
   } catch (e) { send(res, /Unsupported/.test(e.message) ? 400 : 502, { error: e.message }); }
 });
 if (require.main === module) ready.then(() => server.listen(CFG.port, () => { console.log('Chloe server on ' + CFG.port); ensureWebhook().catch(() => {}); }));
-module.exports = { AUTO, MACRO, forecasts, server, CFG, runJobs, getCandles, getNews, state, ready, resolveTrade, recordPaper, paperReport, statsOf };
+module.exports = { INTEL, runCommand, buildDayReport, sendDayReport, queueValidation, pumpValidation, bestPerPair, monitorChecks, runStorageTest, gateFor, hitLine, analyse, AUTO, MACRO, forecasts, server, CFG, runJobs, getCandles, getNews, state, ready, resolveTrade, recordPaper, paperReport, statsOf };

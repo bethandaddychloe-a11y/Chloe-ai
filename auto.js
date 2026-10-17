@@ -18,7 +18,7 @@ const num = (x, lo, hi, d) => { x = parseFloat(x); return isFinite(x) ? Math.min
 
 module.exports = function makeAuto(D) {
   const { CFG, state, saveState, telegram, statsOf, ENV } = D, evs = () => (D.events ? D.events() : CFG.events);
-  const MAX_LIVE_RISK = num(ENV.MAX_LIVE_RISK_PCT, 0.1, 10, 2);
+  const MAX_LIVE_RISK = num(ENV.MAX_LIVE_RISK_PCT, 0.1, 10, 2), LOSS_STREAK = Math.round(num(ENV.AUTO_LOSS_STREAK, 1, 10, 3));
   const EA_KEY = ENV.EA_KEY || '', ADMIN = ENV.ADMIN_TOKEN || ENV.RUN_TOKEN || '';
   const day = () => new Date().toISOString().slice(0, 10);
   const weekKey = () => { const d = new Date(); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); };
@@ -79,6 +79,8 @@ module.exports = function makeAuto(D) {
   function guard(sig, selfId) {
     const a = A(), c = a.cfg, p = planOf(), hb = a.hb, now = Date.now();
     if (!c.enabled) return 'automation is off';
+    if (D.paused && D.paused()) return 'paused by you (send /resume in Telegram)';
+    if (sig.stale) return 'data is stale: ' + sig.stale;
     if (c.killed) return 'kill switch is on';
     if (!EA_KEY) return 'EA_KEY is not set on the server';
     if (!hb || now - hb.at > 180000) return 'the Expert Advisor is offline';
@@ -89,6 +91,8 @@ module.exports = function makeAuto(D) {
     if (!p.kinds.includes(sig.kind)) return p.name + ' does not take ' + sig.kind + ' signals';
     if (sig.conf < p.minConf) return 'confidence ' + sig.conf + '% is under ' + p.minConf + '%';
     if (a.haltDay === day()) return 'stopped for today by the plan limits';
+    if (c.mode === 'live' && !sig.proven) return 'live trading needs this strategy proven on this pair (Strategy tab, best strategy per pair)';
+    { let streak = 0; for (const t of a.trades.filter(t => t.mode === c.mode && t.status === 'closed' && t.closedAt && new Date(t.closedAt).toISOString().slice(0, 10) === day()).sort((x, y) => y.closedAt - x.closedAt)) { if ((t.profit || 0) < 0) streak++; else break; } if (streak >= LOSS_STREAK) return streak + ' losses in a row today, stopped until tomorrow'; }
     if (evs().some(e => e.t - now < 30 * 60000 && e.t - now > -15 * 60000)) return 'news blackout around a scheduled release';
     const fam = famOf(sig, selfId);
     if (fam.length) { const r = addCheck(sig, fam, selfId); if (r.why) return r.why; }
@@ -109,7 +113,7 @@ module.exports = function makeAuto(D) {
     const fam = famOf(sig), add = fam.length ? addCheck(sig, fam) : null, isAdd = !!(add && add.parent);
     const ti = { tp1: 0, tp2: 1, tp3: 2 }[p.tp] || 1, tpDist = Math.abs(sig.plan.tps[ti].p - sig.plan.entry), now = Date.now();
     const rrSig = tpDist / sig.plan.dist, base = p.goal ? goalRisk(a.hb.account.equity, rrSig) : effRisk(p), risk = isAdd ? Math.max(0.1, Math.round(base * c.scale.addFrac * 100) / 100) : base, ask = c.approval !== 'auto';
-    const t = { id: ++a.seq, at: now, mode: c.mode, plan: p.id, kind: sig.kind, sym: sig.sym, tf: sig.tf, dir: sig.dir, conf: sig.conf, strat: sig.strat, riskPct: risk, slDist: sig.plan.dist, tpDist, tpKey: p.tp, entry: sig.plan.entry, slPrice: sig.plan.sl, tpPrice: sig.plan.tps[ti].p, goalRun: p.goal ? c.goal.run : 0, expireSec: sig.kind === 'scalp' ? 150 : 900, status: ask ? 'pending' : 'queued', askUntil: ask ? now + (sig.kind === 'scalp' ? 180 : 1200) * 1000 : 0, isAdd, parent: isAdd ? add.parent.id : null, dealIds: [] };
+    const t = { id: ++a.seq, at: now, mode: c.mode, plan: p.id, kind: sig.kind, sym: sig.sym, tf: sig.tf, dir: sig.dir, conf: sig.conf, strat: sig.strat, proven: !!sig.proven, riskPct: risk, slDist: sig.plan.dist, tpDist, tpKey: p.tp, entry: sig.plan.entry, slPrice: sig.plan.sl, tpPrice: sig.plan.tps[ti].p, goalRun: p.goal ? c.goal.run : 0, expireSec: sig.kind === 'scalp' ? 150 : 900, status: ask ? 'pending' : 'queued', askUntil: ask ? now + (sig.kind === 'scalp' ? 180 : 1200) * 1000 : 0, isAdd, parent: isAdd ? add.parent.id : null, dealIds: [] };
     a.trades.push(t);
     if (a.trades.length > 500) a.trades = a.trades.filter((x, i) => i >= a.trades.length - 500 || OPEN_ST.includes(x.status));
     if (ask && D.ask) {
@@ -122,7 +126,7 @@ module.exports = function makeAuto(D) {
     const a = A(); sweep();
     const t = a.trades.find(x => x.id === +id);
     if (!t || t.status !== 'pending') { await saveState(); return { ok: false, error: 'That one is no longer waiting (already answered or timed out).' }; }
-    const why = guard({ kind: t.kind, sym: t.sym, dir: t.dir, conf: t.conf }, t.id);
+    const why = guard({ kind: t.kind, sym: t.sym, dir: t.dir, conf: t.conf, proven: !!t.proven }, t.id);
     if (why) { t.status = 'declined'; t.err = why; await saveState(); return { ok: false, error: 'Not locked in: ' + why + '.' }; }
     t.status = 'queued'; t.at = Date.now(); t.approvedAt = t.at; await saveState(); return { ok: true };
   }
