@@ -49,6 +49,7 @@ header{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-betw
 .chip i{width:7px;height:7px;border-radius:50%;background:var(--muted);display:inline-block}
 .chip.warn i{background:var(--warn)}
 .chip.ok i{background:var(--buy)}
+.chip.bad i{background:var(--sell,#e5484d)}
 
 .panel{display:flex;flex-direction:column;gap:14px}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;min-width:0}
@@ -351,6 +352,12 @@ details[open] summary{margin-bottom:10px}
     <div id="stratRank"></div>
     <p class="note" id="stratRankNote" style="margin-bottom:0"></p>
   </div>
+  <div class="card" id="bpCard">
+    <h2>Best strategy on each pair</h2>
+    <p class="note" style="margin-top:0">Every strategy is run on long history (up to 2000 H4 candles). The first 70% is the practice half. The last 30% is the exam it never saw. Only strategies that pass the exam are marked proven.</p>
+    <div id="bpBody" class="note">Loading...</div>
+    <div class="btns" style="margin-top:10px"><button class="btn" id="btnBp">Refresh</button></div>
+  </div>
   <div class="card">
     <h2>Chart</h2>
     <label class="chk"><input id="shZones" type="checkbox" checked>Show order blocks and fair value gaps</label>
@@ -378,7 +385,24 @@ details[open] summary{margin-bottom:10px}
       <button class="btn" data-go="risk">Risk</button>
       <button class="btn" data-go="test">Backtest</button>
       <button class="btn" data-go="journal">Journal</button>
+      <button class="btn" data-go="ask">Ask Chloe</button>
     </div>
+  </div>
+</section>
+
+<section class="panel" id="p-ask" hidden>
+  <div class="card">
+    <h2>Ask Chloe</h2>
+    <p class="note" style="margin-top:0">Type a question or a command. The same words work in Telegram. Examples: how did we do today, why did gold lose, best strategy for USDJPY, what if CPI is hot.</p>
+    <div class="row"><input id="askIn" type="text" placeholder="Ask anything about your setups" autocomplete="off"></div>
+    <div class="btns" style="margin-top:10px"><button class="btn primary" id="btnChl">Ask</button><button class="btn" data-q="/status">Status</button><button class="btn" data-q="/signal gold">Gold signal</button><button class="btn" data-q="/best">Best strategy</button><button class="btn" data-q="/learn">Learning</button><button class="btn" data-q="/whatif cpi hot">What if</button></div>
+    <pre id="askOut" class="note" style="white-space:pre-wrap;margin-top:12px;font-family:inherit"></pre>
+  </div>
+  <div class="card">
+    <h2>Today's report</h2>
+    <p class="note" style="margin-top:0">Sent to Telegram every night too. Setups found, what worked and failed and why, strategy and pair breakdown, best strategy per pair.</p>
+    <pre id="repOut" class="note" style="white-space:pre-wrap;font-family:inherit">Loading...</pre>
+    <div class="btns" style="margin-top:10px"><button class="btn" id="btnRep">Refresh</button><button class="btn" id="btnRepSend">Send to Telegram now</button></div>
   </div>
 </section>
 
@@ -631,6 +655,11 @@ details[open] summary{margin-bottom:10px}
     <div id="ppBody" class="note" style="margin-top:12px">Loading...</div>
     <div class="btns" style="margin-top:10px"><button class="btn" id="btnPaper">Refresh</button></div>
   </div>
+  <div class="card" id="lrCard">
+    <h2>What Chloe is learning</h2>
+    <div id="lrBody" class="note">Loading...</div>
+    <p class="note" style="margin-bottom:0">Suggestions only appear once a group has 20 finished setups. Nothing changes until you approve it.</p>
+  </div>
   <div class="card">
     <h2>Account overview</h2>
     <div class="stats" id="acct"></div>
@@ -687,7 +716,7 @@ var G=null;
 function jget(k){try{return JSON.parse(localStorage.getItem(k)||'{}')||{}}catch(e){return {}}}
 function jset(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
 S.draw=jget(DKEY);S.base=jget(BKEY);S.news=jget(NKEY);
-S.stratMode=jget('chloe.strat.v1').mode||'auto';var VW=jget('chloe.view.v1');S.showZones=VW.zones!==false;S.showSess=VW.sess!==false;S.showLiq=VW.liq!==false;S.ctype=VW.ctype||'candles';
+S.stratMode=jget('chloe.strat.v1').mode||'sweep';var VW=jget('chloe.view.v1');S.showZones=VW.zones!==false;S.showSess=VW.sess!==false;S.showLiq=VW.liq!==false;S.ctype=VW.ctype||'candles';
 function saveDraw(){jset(DKEY,S.draw)}
 function curDraw(){return S.draw[S.sym]||(S.draw[S.sym]=[])}
 
@@ -1541,6 +1570,13 @@ function applyLive(j){
   liveMsg('');
   setData(cs,'live');
   $('liveStatus').textContent='Live: '+L()+' '+S.tf+', '+cs.length+' candles, last candle '+cs[cs.length-1].t+'. Updated '+new Date(j.fetched_at*1000).toLocaleTimeString()+'.';
+  showFresh(j.fresh);
+}
+function showFresh(f){
+  var chip=$('chipData'),t=$('chipDataText');if(!f)return;
+  if(f.status==='stale'){chip.className='chip bad';t.textContent='STALE: '+(f.ageMin==null?'no data':f.ageMin+' min old');liveMsg('Data is stale ('+f.reason+'). Chloe will not alert, paper trade or send orders on it until fresh candles arrive.')}
+  else if(f.status==='closed'){chip.className='chip warn';t.textContent='Market closed. Last candle '+String(f.last||'').slice(5,16)}
+  else{chip.className='chip ok';t.textContent='Live: '+f.ageMin+' min old'}
 }
 async function fetchLive(){
   try{
@@ -1755,7 +1791,7 @@ function wireNew(){
   renderEvents();setInterval(renderEvents,60000);
 }
 
-var MORE=['data','risk','test','journal'],AC={key:'',sig:null};
+var MORE=['data','risk','test','journal','ask'],AC={key:'',sig:null};
 /* ---------- strategy tab ---------- */
 var STRAT_GUIDE={
   pa:['Reads the last swing highs and lows for trend, looks for an engulfing or pin bar, checks the price is at a proven level with room to the next one, and checks the higher timeframe and your news view.','Stop beyond the nearest swing plus a quarter of the signal candle. Targets at the next levels, at least 0.8R, 1.5R and 2.5R away.'],
@@ -1906,7 +1942,7 @@ function wire2(){
   setInterval(function(){if(SCO.auto&&!$('p-scalp').hidden&&!scBusy&&SC)scalpScan()},300000);
   MORE.forEach(function(id){var p=$('p-'+id),b=el('button','btn','‹ More');b.type='button';b.style.alignSelf='flex-start';b.addEventListener('click',function(){select('more')});p.insertBefore(b,p.firstChild)});
   Array.prototype.forEach.call(document.querySelectorAll('[data-go]'),function(b){b.addEventListener('click',function(){select(b.dataset.go)})});
-  wirePaper();
+  wirePaper();wireAsk();
   renderScalp();
 }
 
@@ -2299,6 +2335,54 @@ function wire4(){
   renderScen();setInterval(function(){if($('sessBar')&&!$('p-signal').hidden)renderSess()},60000);
 }
 
+
+/* ---------- ask Chloe, day report, learning, best strategy per pair ---------- */
+function askRun(text){
+  var o=$('askOut');o.textContent='Thinking...';
+  api('/api/ask','POST',{text:text}).then(function(j){o.textContent=j.text||j.error||'No answer'}).catch(function(e){o.textContent='Could not reach the server: '+e.message});
+}
+function loadReport(){
+  var o=$('repOut');o.textContent='Loading...';
+  srvGet('/api/report').then(function(j){o.textContent=j.text||'No report'}).catch(function(e){o.textContent='Could not load: '+e.message});
+}
+function loadLearn(){
+  var box=$('lrBody');box.textContent='Loading...';
+  srvGet('/api/learn').then(function(j){
+    box.textContent='';
+    box.appendChild(el('div',null,j.closed+' finished setups. '+(j.ready?'':'Suggestions start at 20 ('+j.need+' to go).')));
+    if(j.lossCauses&&j.lossCauses.length){var h=el('div',null,'Why setups failed');h.style.cssText='margin:10px 0 4px;font-weight:700';box.appendChild(h);j.lossCauses.slice(0,5).forEach(function(c){box.appendChild(el('div',null,'\u2022 '+c.cause+' ('+c.n+')'))})}
+    j.suggestions.forEach(function(s){
+      var row=el('div','trade');row.style.marginTop='10px';row.appendChild(el('div',null,s.text));
+      row.appendChild(el('div','muted','Status: '+s.status));
+      var b=el('div','btns');b.style.marginTop='8px';
+      [['approved','Approve'],['rejected','Reject'],['pending','Undo']].forEach(function(x){if(x[0]===s.status)return;var bt=el('button','btn',x[1]);bt.type='button';bt.addEventListener('click',function(){api('/api/learn/decide','POST',{id:s.id,status:x[0]}).then(function(r){if(r.error){alert(r.error+' (set your admin token in the Auto tab first)')}loadLearn()})});b.appendChild(bt)});
+      row.appendChild(b);box.appendChild(row)});
+    (j.notes||[]).forEach(function(n){var d=el('div','note',n);d.style.marginTop='8px';box.appendChild(d)});
+  }).catch(function(e){box.textContent='Could not load: '+e.message});
+}
+function loadBest(){
+  var box=$('bpBody');box.textContent='Loading...';
+  srvGet('/api/validate?tf=H4').then(function(j){
+    box.textContent='';
+    j.pairs.forEach(function(p){
+      var row=el('div','trade');row.appendChild(el('b',null,p.sym));
+      row.appendChild(el('div','note',p.line));
+      if(p.rows&&p.rows.length){p.rows.slice(0,4).forEach(function(r){var d=el('div','muted mono',r.name+': '+r.label+', exam '+r.oos.n+' trades, '+(r.oos.avgR>=0?'+':'')+r.oos.avgR.toFixed(2)+'R, TP1 '+Math.round(r.tp1.p*100)+'% of '+r.tp1.n);row.appendChild(d)})}
+      if(p.live&&p.live.length)row.appendChild(el('div','muted','Live paper: '+p.live.slice(0,2).map(function(x){return x.strat+' '+x.n+' trades '+(x.avgR>=0?'+':'')+x.avgR.toFixed(2)+'R'}).join('; ')));
+      box.appendChild(row)});
+    if(j.waiting&&j.waiting.length||j.running){box.appendChild(el('div','note','Still checking: '+j.waiting.join(', ')+'. Tap Refresh in a minute.'))}
+    box.appendChild(el('div','note',j.note));
+  }).catch(function(e){box.textContent='Could not load: '+e.message});
+}
+function wireAsk(){
+  $('btnChl').addEventListener('click',function(){askRun($('askIn').value)});
+  $('askIn').addEventListener('keydown',function(e){if(e.key==='Enter')askRun($('askIn').value)});
+  Array.prototype.forEach.call(document.querySelectorAll('[data-q]'),function(b){b.addEventListener('click',function(){$('askIn').value=b.dataset.q;askRun(b.dataset.q)})});
+  $('btnRep').addEventListener('click',loadReport);
+  $('btnRepSend').addEventListener('click',function(){api('/api/report?send=1').then(function(j){$('repOut').textContent=j.error?j.error+' (set your admin token in the Auto tab first)':'Sent to Telegram.'})});
+  $('btnBp').addEventListener('click',loadBest);
+}
+
 function wirePaper(){
   $('btnPaper').addEventListener('click',loadPaper);
   $('ppTp').addEventListener('change',function(){PPTP=$('ppTp').value;loadPaper()});
@@ -2385,7 +2469,7 @@ var TVINT={M1:'1',M5:'5',M15:'15',H1:'60',H4:'240',D1:'D'};
 function updateTv(){var sy=TVSYM[S.sym]||('OANDA:'+L());$('tvLink').setAttribute('href','https://www.tradingview.com/chart/?symbol='+encodeURIComponent(sy)+'&interval='+TVINT[S.tf])}
 
 /* tabs */
-var TABS=['signal','scalp','strat','news','auto','broker','more','data','risk','test','journal'];
+var TABS=['signal','scalp','strat','news','auto','broker','more','data','risk','test','journal','ask'];
 function select(name){
   TABS.forEach(function(t){$('p-'+t).hidden=t!==name});
   var navName=MORE.indexOf(name)>=0?'more':name;
@@ -2393,7 +2477,9 @@ function select(name){
   window.scrollTo(0,0);
   if(name==='signal')drawChart();
   if(name==='scalp')onScalpOpen();
-  if(name==='journal')loadPaper();
+  if(name==='journal'){loadPaper();loadLearn()}
+  if(name==='ask')loadReport();
+  if(name==='strat')loadBest();
   if(name==='auto')loadAuto();
   if(name==='news')loadForecast();
 }
