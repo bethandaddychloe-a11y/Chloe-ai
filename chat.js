@@ -3,8 +3,9 @@
    Keyword matching only, so it costs nothing and never guesses wildly. The server runs the command. */
 
 const SYMS = [[/\b(xauusd|xau|gold)\b/i, 'XAUUSD'], [/\b(btcusd|btc|bitcoin)\b/i, 'BTCUSD'], [/\b(usdjpy|yen|jpy)\b/i, 'USDJPY'], [/\b(gbpusd|gbp|pound|cable|sterling)\b/i, 'GBPUSD'], [/\b(ustec|nas100|nasdaq|nq)\b/i, 'USTEC']];
-const COMMANDS = ['help', 'start', 'status', 'signal', 'why', 'pause', 'resume', 'risk', 'news', 'paper', 'learn', 'validate', 'best', 'report', 'whatif', 'ask', 'progress', 'entered', 'closed', 'added', 'aplus'];
+const COMMANDS = ['help', 'start', 'status', 'signal', 'why', 'pause', 'resume', 'risk', 'news', 'paper', 'learn', 'validate', 'best', 'report', 'whatif', 'ask', 'progress', 'entered', 'closed', 'added', 'aplus', 'chart'];
 const NL = [
+  ['chart', /\b(chart check|check (the |my |this )?chart|analy[sz]e (the |my |this )?chart|read (the |my |this )?chart)\b/],
   ['whatif', /what\s*if|scenario|suppose|if (cpi|nfp|inflation|payrolls)/],
   ['pause', /\b(pause|go quiet|mute|stop (the )?(alerts|signals|trading|bot))\b/],
   ['resume', /\b(resume|unpause|unmute|start (the )?(alerts|signals|bot) again|turn (it )?on)\b/],
@@ -40,6 +41,7 @@ const HELP = [
   '/best  which strategy works best on each pair, with proof level',
   '/validate gold  all strategies on one pair, tested on history',
   '/report  today\'s setups, what worked, what failed, and why',
+  '/chart gold h1  a plain-words read of the chart: trend, levels, zones, what each strategy says. Send a screenshot with a caption like "gold h1" to have it described too',
   '/progress  how the trades you entered are doing, with exit or hold advice',
   '/entered gold 2345.6  tell Chloe you took the latest gold signal at your price',
   '/closed gold 2350  log that you closed it  (/added gold 2352 logs a scale-in)',

@@ -10,6 +10,7 @@ const MACRO = require('./macro.js');
 const INTEL = require('./intel.js');
 const CHAT = require('./chat.js');
 const TRACK = require('./track.js');
+const CHART = require('./chartcheck.js');
 
 const ENV = process.env;
 const CFG = {
@@ -260,9 +261,9 @@ async function ensureWebhook() {
 }
 async function handleTg(update) {
   const msg = update && update.message;
-  if (msg && msg.text) {
+  if (msg && (msg.text || msg.photo)) {
     if (String(msg.chat && msg.chat.id) !== String(CFG.tgChat)) return; // only your own chat can talk to Chloe
-    await ready; const out = await runCommand(msg.text, true);
+    await ready; const out = msg.photo ? await tgPhoto(msg).catch(e => 'Something went wrong: ' + String(e.message).slice(0, 120)) : await runCommand(msg.text, true);
     for (const part of INTEL.chunk(String(out))) await telegram(part);
     return;
   }
@@ -815,6 +816,43 @@ async function cmdWhatIf(args, symHint) {
   if (!open.length) L.push('No open paper trades on ' + sym + ' to test.');
   return L.join('\n');
 }
+/* ---------- chart check: Chloe's own read of live candles, plus an optional screenshot description (needs ANTHROPIC_API_KEY) ---------- */
+function llmBudget() {
+  if (!CFG.llmKey) return 'Screenshot reading is off. It needs an ANTHROPIC_API_KEY on the server (it costs a little per picture). Chloe\'s own read above does not need it.';
+  const d = today(); state.llmUse = state.llmUse && state.llmUse.day === d ? state.llmUse : { day: d, n: 0 };
+  if (state.llmUse.n >= CFG.llmDaily) return 'Screenshot reading is paused for today (' + CFG.llmDaily + ' uses a day, set by LLM_DAILY_LIMIT).';
+  state.llmUse.n++; return null;
+}
+async function visionRead(b64, type, ours) {
+  const r = await doFetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': CFG.llmKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify({ model: CFG.llmModel, max_tokens: 400, system: CHART.VISION_PROMPT, messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: type || 'image/jpeg', data: b64 } }, { type: 'text', text: 'Describe this chart. Then, in one sentence, say whether what you see agrees or disagrees with this rules-based read, and do not invent anything that is not visible: ' + ours }] }] }) });
+  const j = await r.json(); if (j && j.content && j.content[0] && j.content[0].text) return j.content[0].text;
+  throw new Error((j && j.error && j.error.message) || 'the vision model gave no answer');
+}
+async function chartCheck(sym, tf, img) {
+  curDec = INSTR[sym].dec;
+  const raw = await getCandles(sym, tf, 200), cs = dropForming(raw, tf), fr = INTEL.freshness(sym, tf, cs, Date.now(), raw.fellBack);
+  if (fr.status === 'stale') return { text: 'CHLOE CHART CHECK: I will not judge ' + sym + ' ' + tf + ' right now. ' + frText(fr) + '.', read: null, fresh: fr, vision: null };
+  const rd = CHART.read(E, cs, tf, await biasFor(sym), eventNear(12), CFG.minScore, INSTR[sym].dec), L = ['CHLOE CHART CHECK: ' + sym + ' ' + tf + ' (' + frText(fr) + ')'].concat(rd.lines);
+  let vision = null, note = null;
+  if (img) {
+    note = llmBudget();
+    if (!note && img.err) note = 'The screenshot could not be read: ' + img.err + '.';
+    if (!note && !img.b64) note = 'The screenshot could not be read.';
+    if (!note) { try { vision = await visionRead(img.b64, img.type, rd.verdict); L.push('', 'WHAT THE SCREENSHOT SHOWS (read by an AI model, not by Chloe\'s rules):', vision); } catch (e) { note = 'The screenshot could not be read: ' + String(e.message).slice(0, 120); } }
+    if (note) L.push('', note);
+  }
+  L.push('', 'This describes the chart with fixed rules. It does not predict the next move. ' + DISCLAIMER);
+  return { text: L.join('\n'), read: rd, fresh: fr, vision, note };
+}
+async function tgPhoto(msg) {
+  const cap = CHAT.parse(msg.caption || ''), sym = cap.sym, tf = cap.tf || 'H1';
+  if (!sym) return 'I got the picture, but I need the pair. Send it again with a caption like "gold h1" (pairs: gold, btc, usdjpy, gbpusd, nasdaq).';
+  const img = { b64: '', type: 'image/jpeg', err: null };
+  if (CFG.llmKey && msg.photo && msg.photo.length) {
+    try { const f = await tgCall('getFile', { file_id: msg.photo[msg.photo.length - 1].file_id }); if (!f.ok) throw new Error('Telegram would not give me the file'); const r = await doFetch('https://api.telegram.org/file/bot' + CFG.tgToken + '/' + f.result.file_path), buf = Buffer.from(await r.arrayBuffer()); if (buf.length > 4500000) throw new Error('the picture is too big'); img.b64 = buf.toString('base64'); } catch (e) { img.err = e.message; }
+  }
+  return (await chartCheck(sym, tf, img)).text;
+}
 async function llmAsk(text) {
   if (!CFG.llmKey) return null;
   const d = today(); state.llmUse = state.llmUse && state.llmUse.day === d ? state.llmUse : { day: d, n: 0 };
@@ -842,6 +880,7 @@ async function runCommand(text, control) {
       case 'best': return cmdBest(q.tf || 'H4');
       case 'progress': return await cmdProgress();
       case 'aplus': return cmdAplus(q.args, control);
+      case 'chart': return (await chartCheck(sym, q.tf || 'H1')).text;
       case 'entered': case 'closed': case 'added': {
         if (!control) return 'Logging trades needs your admin token or your Telegram chat.';
         const nums = q.args.filter(x => /^\d+(\.\d+)?$/.test(x)).map(Number), px = nums.length ? nums[nums.length - 1] : null;
@@ -875,7 +914,7 @@ async function broker() {
 
 /* the folder may be named static or Static depending on how it was uploaded */
 const STATIC_DIR = (() => { for (const n of ['static', 'Static', 'STATIC']) { const d = path.join(__dirname, n); if (fs.existsSync(d)) return d; } return path.join(__dirname, 'static'); })();
-const readBody = req => new Promise((ok, no) => { let d = ''; req.on('data', c => { d += c; if (d.length > 200000) { req.destroy(); no(new Error('too big')); } }); req.on('end', () => ok(d)); req.on('error', no); });
+const readBody = (req, max) => new Promise((ok, no) => { let d = ''; req.on('data', c => { d += c; if (d.length > (max || 200000)) { req.destroy(); no(new Error('too big')); } }); req.on('end', () => ok(d)); req.on('error', no); });
 let EVCTX = null; try { EVCTX = ENV.EVENT_CTX ? JSON.parse(ENV.EVENT_CTX) : null; } catch (e) {}
 async function forecasts() {
   await getNews().catch(() => {});
@@ -984,6 +1023,20 @@ const server = http.createServer(async (req, res) => {
       state.aplus = !!b.on; await saveState(); return send(res, 200, { ok: true, aplus: state.aplus });
     }
     if (p === '/api/aplus') return send(res, 200, { aplus: state.aplus });
+    if (p === '/api/chartcheck' && req.method === 'POST') {
+      let b = {}; try { b = JSON.parse(await readBody(req, 6000000) || '{}'); } catch (e) { return send(res, 400, { error: 'The picture was too big or not valid. Try a smaller screenshot.' }); }
+      const sym = String(b.symbol || 'XAUUSD').toUpperCase(), tf = String(b.tf || 'H1').toUpperCase();
+      if (!INSTR[sym]) return send(res, 400, { error: 'Unsupported pair' }); if (!TF_TD[tf]) return send(res, 400, { error: 'Unsupported timeframe' });
+      let img = null;
+      if (b.image) {
+        if (!AUTO.isAdmin(req.headers['x-admin'] || q.get('token'))) return send(res, 403, { error: 'Reading a screenshot needs your admin token (paste your RUN_TOKEN in the Progress tab first).' });
+        const m = /^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+\/=]+)$/.exec(String(b.image));
+        if (!m || m[2].length > 5500000) return send(res, 400, { error: 'That picture could not be used. Send a JPEG or PNG under about 4 MB.' });
+        img = { type: m[1], b64: m[2], err: null };
+      }
+      const r = await chartCheck(sym, tf, img); await saveState();
+      return send(res, 200, { ok: true, text: r.text, read: r.read, fresh: r.fresh, vision: r.vision, note: r.note, visionOn: !!CFG.llmKey });
+    }
     if (p === '/api/storage-test') return send(res, 200, await runStorageTest());
     if (p === '/api/news') return send(res, 200, await getNews());
     if (p === '/api/paper') return send(res, 200, paperReport(q.get('tp') ? 'tp' + q.get('tp') : 'tp2'));
