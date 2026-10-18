@@ -50,6 +50,17 @@ header{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-betw
 .chip.warn i{background:var(--warn)}
 .chip.ok i{background:var(--buy)}
 .chip.bad i{background:var(--sell,#e5484d)}
+.pbar{height:16px;border-radius:99px;background:var(--surface2);border:1px solid var(--line);overflow:hidden}
+.pbar i{display:block;height:100%;border-radius:99px;background:var(--buy)}
+.pbar.loss i{background:var(--sell)}
+.pbig{font-size:26px;font-weight:800;letter-spacing:-.5px}
+.adv{border-radius:10px;padding:10px 12px;border:1px solid var(--line);background:var(--surface2);display:grid;gap:6px}
+.adv b.k{font-size:11px;letter-spacing:.6px;text-transform:uppercase}
+.adv.EXIT{border-color:var(--sell)} .adv.EXIT b.k{color:var(--sell)}
+.adv.MOVE_STOP,.adv.TRAIL,.adv.WATCH{border-color:var(--warn)} .adv.MOVE_STOP b.k,.adv.TRAIL b.k,.adv.WATCH b.k{color:var(--warn)}
+.adv.HOLD,.adv.CLOSE{border-color:var(--buy)} .adv.HOLD b.k,.adv.CLOSE b.k{color:var(--buy)}
+.adv ul{margin:0;padding-left:18px;font-size:12.5px}
+.pgrow{border-top:1px solid var(--line);padding:10px 0;display:grid;gap:8px}
 
 .panel{display:flex;flex-direction:column;gap:14px}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;min-width:0}
@@ -386,6 +397,7 @@ details[open] summary{margin-bottom:10px}
       <button class="btn" data-go="test">Backtest</button>
       <button class="btn" data-go="journal">Journal</button>
       <button class="btn" data-go="ask">Ask Chloe</button>
+      <button class="btn" data-go="broker">Broker</button>
     </div>
   </div>
 </section>
@@ -404,6 +416,19 @@ details[open] summary{margin-bottom:10px}
     <pre id="repOut" class="note" style="white-space:pre-wrap;font-family:inherit">Loading...</pre>
     <div class="btns" style="margin-top:10px"><button class="btn" id="btnRep">Refresh</button><button class="btn" id="btnRepSend">Send to Telegram now</button></div>
   </div>
+</section>
+
+<section class="panel" id="p-progress" hidden>
+  <div class="card">
+    <h2>Progress</h2>
+    <p class="note" style="margin-top:0">Confirm the trades you really took and Chloe follows them: how far to the target, how much of your risk is used, and when to exit, hold, move the stop or add. It follows the rules, it does not predict.</p>
+    <label class="chk"><input id="chkAplus" type="checkbox">A+ only mode: alert me only for the strictest setups (every setup is still recorded for comparison)</label>
+    <div id="pgTok" hidden style="margin-top:10px"><div class="note" style="margin-bottom:6px">Paste your admin token once so this phone can confirm trades. It is your RUN_TOKEN.</div><div class="row"><input id="pgTokIn" type="password" placeholder="Admin token" autocomplete="off"></div><div class="btns" style="margin-top:8px"><button class="btn" id="btnPgTok">Save token</button></div></div>
+    <div class="note" id="pgMsg" style="margin-top:8px"></div>
+  </div>
+  <div class="card"><h2>My open trades</h2><div id="pgOpen" class="note">Loading...</div></div>
+  <div class="card"><h2>Signals Chloe sent</h2><p class="note" style="margin-top:0">Last 3 days. Tap one, then confirm the price you entered at, even if it differs from the signal.</p><div id="pgSig" class="note">Loading...</div></div>
+  <div class="card"><h2>Finished trades</h2><div id="pgDone" class="note">Loading...</div></div>
 </section>
 
 <!-- AUTO -->
@@ -688,7 +713,7 @@ details[open] summary{margin-bottom:10px}
   <button role="tab" data-tab="strat" aria-selected="false"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><path d="M16.500 13v7M13 16.500h7"/></svg>Strategy</button>
   <button role="tab" data-tab="news" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M4 5h13v14H6a2 2 0 01-2-2z"/><path d="M17 9h3v8a2 2 0 01-2 2"/><path d="M8 9h5M8 13h5"/></svg>News</button>
   <button role="tab" data-tab="auto" aria-selected="false"><svg viewBox="0 0 24 24"><rect x="5" y="8" width="14" height="10" rx="2"/><path d="M12 8V4M9 13h.01M15 13h.01M9 21v-3M15 21v-3"/></svg>Auto</button>
-  <button role="tab" data-tab="broker" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 00-5.7 0l-3 3A4 4 0 0011 18.700l1-1"/></svg>Broker</button>
+  <button role="tab" data-tab="progress" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Progress</button>
   <button role="tab" data-tab="more" aria-selected="false"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.500"/><circle cx="12" cy="12" r="1.500"/><circle cx="19" cy="12" r="1.500"/></svg>More</button>
 </div></nav>
 
@@ -1791,7 +1816,7 @@ function wireNew(){
   renderEvents();setInterval(renderEvents,60000);
 }
 
-var MORE=['data','risk','test','journal','ask'],AC={key:'',sig:null};
+var MORE=['data','risk','test','journal','ask','broker'],AC={key:'',sig:null};
 /* ---------- strategy tab ---------- */
 var STRAT_GUIDE={
   pa:['Reads the last swing highs and lows for trend, looks for an engulfing or pin bar, checks the price is at a proven level with room to the next one, and checks the higher timeframe and your news view.','Stop beyond the nearest swing plus a quarter of the signal candle. Targets at the next levels, at least 0.8R, 1.5R and 2.5R away.'],
@@ -1942,7 +1967,7 @@ function wire2(){
   setInterval(function(){if(SCO.auto&&!$('p-scalp').hidden&&!scBusy&&SC)scalpScan()},300000);
   MORE.forEach(function(id){var p=$('p-'+id),b=el('button','btn','‹ More');b.type='button';b.style.alignSelf='flex-start';b.addEventListener('click',function(){select('more')});p.insertBefore(b,p.firstChild)});
   Array.prototype.forEach.call(document.querySelectorAll('[data-go]'),function(b){b.addEventListener('click',function(){select(b.dataset.go)})});
-  wirePaper();wireAsk();
+  wirePaper();wireAsk();wireProgress();
   renderScalp();
 }
 
@@ -2383,6 +2408,87 @@ function wireAsk(){
   $('btnBp').addEventListener('click',loadBest);
 }
 
+/* ---------- progress tab: trades you entered ---------- */
+var PGT=null,PGOPEN={};
+function pgMsg(t,bad){var m=$('pgMsg');m.textContent=t||'';m.style.color=bad?'var(--sell)':''}
+function pgAgo(ms){var m=Math.max(0,Math.round((Date.now()-ms)/60000));return m<60?m+' min ago':(m<1440?Math.round(m/60)+' h ago':Math.round(m/1440)+' d ago')}
+function pgPct(v){var p=v.P&&v.P.pct;return p==null?'n/a':(p>=0?'+':'')+p+'%'}
+function pgAct(path,body,ok){
+  return api('/api/progress/'+path,'POST',body).then(function(j){
+    if(j._code===403){pgMsg('Paste your admin token above first, then try again.',true);$('pgTok').hidden=false;return}
+    if(j.error){pgMsg(j.error,true);return}
+    pgMsg(ok||'Saved.');loadProgress();
+  }).catch(function(e){pgMsg('Could not reach the server: '+e.message,true)});
+}
+function pgBar(v,box){
+  var pct=v.P.pct==null?0:v.P.pct,loss=pct<0,big=el('div','pbig '+(loss?'neg':'pos'),(pct>=0?'+':'')+pct+'%');
+  var sub=loss?'of the amount you risked':(v.P.R>=0?'of the way to the main target (TP2)':'');
+  var top=el('div');top.style.cssText='display:flex;align-items:baseline;gap:10px;flex-wrap:wrap';top.appendChild(big);top.appendChild(el('span','note',sub+'  ('+(v.P.R>=0?'+':'')+v.P.R.toFixed(2)+'R)'));box.appendChild(top);
+  var bar=el('div','pbar'+(loss?' loss':'')),fill=document.createElement('i');fill.style.width=Math.min(100,Math.abs(pct))+'%';bar.appendChild(fill);box.appendChild(bar);
+}
+function pgOpenCard(v){
+  var d=v.dec,box=el('div','trade'),head=el('div','trade-head'),l=el('div');
+  l.appendChild(el('b',null,v.sym+' '+v.tf+' '));l.appendChild(el('span','tag '+v.dir,v.dir));head.appendChild(l);head.appendChild(el('span','muted mono','#'+v.id+'  '+pgAgo(v.enteredAt)));box.appendChild(head);
+  if(v.error){box.appendChild(el('div','note','Could not read live data: '+v.error));return box}
+  pgBar(v,box);
+  var g=el('div','grid mono');
+  [['Entry',v.entry.toFixed(d)],['Now',v.price.toFixed(d)],['Stop',v.sl.toFixed(d)],['TP1'+(v.hits&&v.hits.tp1?' \u2713':''),v.tps[0].toFixed(d)],['TP2'+(v.hits&&v.hits.tp2?' \u2713':''),v.tps[1].toFixed(d)],['TP3'+(v.hits&&v.hits.tp3?' \u2713':''),v.tps[2].toFixed(d)]].forEach(function(x){var c=el('div');c.appendChild(el('span',null,x[0]));c.appendChild(document.createTextNode(x[1]));g.appendChild(c)});
+  box.appendChild(g);
+  if(v.adds&&v.adds.length)box.appendChild(el('div','note','Added positions: '+v.adds.map(function(a){return a.price.toFixed(d)+' (half size)'}).join(', ')));
+  var a=v.advice;
+  if(a){
+    var ad=el('div','adv '+a.action);ad.appendChild(el('b','k',a.action.replace('_',' ')));ad.appendChild(el('div',null,a.headline));
+    if(a.reasons&&a.reasons.length){var ul=el('ul');a.reasons.forEach(function(r){ul.appendChild(el('li',null,r))});ad.appendChild(ul)}
+    box.appendChild(ad);
+    if(a.scale){var sc=el('div','adv '+(a.scale.ok?'HOLD':'WATCH'));sc.appendChild(el('b','k','Scale in'));sc.appendChild(el('div',null,a.scale.text));
+      if(a.scale.ok){var ab=el('button','btn','I added this position');ab.type='button';ab.addEventListener('click',function(){var p=prompt('Price you added at',a.scale.price||v.price.toFixed(d));if(p)pgAct('add',{id:v.id,price:p},'Add logged. Chloe counts it as half size.')});sc.appendChild(ab)}
+      box.appendChild(sc)}
+  }
+  if(!v.live)box.appendChild(el('div','note','Price data is not live right now ('+(v.fresh?v.fresh.reason||v.fresh.status:'unknown')+'). Check your broker.'));
+  var b=el('div','btns');
+  [['I moved my stop',function(){var p=prompt('New stop price (it can only move toward profit)',v.entry.toFixed(d));if(p)pgAct('stop',{id:v.id,sl:p},'Stop updated.')}],
+   ['I closed it',function(){var p=prompt('Price you closed at',v.price.toFixed(d));if(p)pgAct('close',{id:v.id,exit:p},'Trade logged as closed.')}],
+   ['Remove (entered by mistake)',function(){if(confirm('Stop tracking this trade and delete it?'))pgAct('untrack',{id:v.id},'Removed.')}]].forEach(function(x){var bt=el('button','btn',x[0]);bt.type='button';bt.addEventListener('click',x[1]);b.appendChild(bt)});
+  box.appendChild(b);return box;
+}
+function pgSigRow(s){
+  var d=s.dec,row=el('div','pgrow'),head=el('div','trade-head'),l=el('div');
+  l.appendChild(el('b',null,s.sym+' '+s.tf+' '));l.appendChild(el('span','tag '+s.dir,s.dir));if(s.aplus)l.appendChild(el('span','tag',' A+'));
+  head.appendChild(l);head.appendChild(el('span','muted mono','#'+s.id+'  '+pgAgo(s.at)));row.appendChild(head);
+  row.appendChild(el('div','note',s.strat+', '+s.conf+'%.  Entry '+s.plan.ref.toFixed(d)+'  Stop '+s.plan.sl.toFixed(d)+'  TP1 '+s.plan.tps[0].toFixed(d)+' TP2 '+s.plan.tps[1].toFixed(d)+' TP3 '+s.plan.tps[2].toFixed(d)));
+  if(s.tracking){row.appendChild(el('div','note','You are tracking this as trade #'+s.tracking+'.'));return row}
+  if(s.done){row.appendChild(el('div','note','You already tracked and finished this one.'));return row}
+  var open=el('button','btn','I entered this trade');open.type='button';row.appendChild(open);
+  var form=el('div');form.hidden=true;form.style.cssText='display:grid;gap:8px';
+  var inp=document.createElement('input');inp.type='number';inp.step='any';inp.inputMode='decimal';inp.placeholder='Your entry price';inp.value=s.plan.ref.toFixed(d);
+  var sel=document.createElement('select');[['0','I entered just now'],['5','about 5 minutes ago'],['15','about 15 minutes ago'],['30','about 30 minutes ago'],['60','about an hour ago'],['180','about 3 hours ago']].forEach(function(o){var op=document.createElement('option');op.value=o[0];op.textContent=o[1];sel.appendChild(op)});
+  var ok=el('button','btn primary','Confirm and track it');ok.type='button';
+  ok.addEventListener('click',function(){pgAct('enter',{sigId:s.id,entry:inp.value,minutesAgo:sel.value},'Tracking started. Chloe now follows this trade.')});
+  form.appendChild(el('div','note','Type the price you actually got. Chloe measures everything from your price.'));form.appendChild(inp);form.appendChild(sel);form.appendChild(ok);row.appendChild(form);
+  open.addEventListener('click',function(){form.hidden=!form.hidden});
+  return row;
+}
+function loadProgress(){
+  api('/api/progress').then(function(j){
+    if(j.error){pgMsg(j.error,true);return}
+    $('chkAplus').checked=!!j.aplus;$('pgTok').hidden=!!j.admin;
+    var o=$('pgOpen');o.textContent='';
+    if(!j.open.length)o.textContent='Nothing tracked yet. When Chloe sends a signal and you take it, confirm it below (or tap the button under the Telegram alert).';
+    j.open.forEach(function(v){var c=pgOpenCard(v);c.style.marginTop='10px';o.appendChild(c)});
+    var s=$('pgSig');s.textContent='';
+    if(!j.signals.length)s.textContent='No signals in the last 3 days yet. They appear here when Chloe sends an alert.';
+    j.signals.forEach(function(x){s.appendChild(pgSigRow(x))});
+    var dn=$('pgDone');dn.textContent='';
+    if(!j.closed.length)dn.textContent='Finished trades will be listed here with the result in R.';
+    j.closed.forEach(function(t){var r=el('div','prow');r.style.cursor='default';var a=el('span');a.appendChild(el('span','tag '+t.dir,t.dir));a.appendChild(document.createTextNode('  '+t.sym+' '+t.tf+'  '+t.result));r.appendChild(a);r.appendChild(el('b','mono '+(t.r>=0?'pos':'neg'),(t.r>=0?'+':'')+t.r.toFixed(2)+'R'));dn.appendChild(r)});
+  }).catch(function(e){$('pgOpen').textContent='Could not load: '+e.message});
+}
+function wireProgress(){
+  $('chkAplus').addEventListener('change',function(){var on=$('chkAplus').checked;api('/api/aplus','POST',{on:on}).then(function(j){if(j._code===403){$('chkAplus').checked=!on;$('pgTok').hidden=false;pgMsg('Paste your admin token first.',true)}else pgMsg(on?'A+ only mode is ON. Other setups are still recorded, but not alerted.':'A+ only mode is off.')})});
+  $('btnPgTok').addEventListener('click',function(){try{localStorage.setItem(ADK,$('pgTokIn').value.trim())}catch(e){}$('pgTokIn').value='';pgMsg('Token saved on this phone.');loadProgress()});
+  if(PGT)clearInterval(PGT);PGT=setInterval(function(){if(!$('p-progress').hidden&&document.visibilityState==='visible')loadProgress()},30000);
+}
+
 function wirePaper(){
   $('btnPaper').addEventListener('click',loadPaper);
   $('ppTp').addEventListener('change',function(){PPTP=$('ppTp').value;loadPaper()});
@@ -2469,7 +2575,7 @@ var TVINT={M1:'1',M5:'5',M15:'15',H1:'60',H4:'240',D1:'D'};
 function updateTv(){var sy=TVSYM[S.sym]||('OANDA:'+L());$('tvLink').setAttribute('href','https://www.tradingview.com/chart/?symbol='+encodeURIComponent(sy)+'&interval='+TVINT[S.tf])}
 
 /* tabs */
-var TABS=['signal','scalp','strat','news','auto','broker','more','data','risk','test','journal','ask'];
+var TABS=['signal','scalp','strat','news','auto','broker','more','data','risk','test','journal','ask','progress'];
 function select(name){
   TABS.forEach(function(t){$('p-'+t).hidden=t!==name});
   var navName=MORE.indexOf(name)>=0?'more':name;
@@ -2479,6 +2585,7 @@ function select(name){
   if(name==='scalp')onScalpOpen();
   if(name==='journal'){loadPaper();loadLearn()}
   if(name==='ask')loadReport();
+  if(name==='progress')loadProgress();
   if(name==='strat')loadBest();
   if(name==='auto')loadAuto();
   if(name==='news')loadForecast();
