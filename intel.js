@@ -196,6 +196,7 @@ function dayReport(o) { // {trades, now, off, tp, counts, best, nameOf, pendingL
   if (bsp.length > 1) { L.push(''); L.push('STRATEGY ON EACH PAIR'); bsp.forEach(r => L.push(row(r))); }
   const mfeLoss = lost.filter(t => t.mfe >= 0.8).length;
   if (lost.length) L.push('', 'Pattern in the losses: ' + (mfeLoss * 2 >= lost.length ? mfeLoss + ' of ' + lost.length + ' reached +0.8R before failing, so exits and targets are worth reviewing.' : lost.filter(t => t.tags && t.tags.htf === 'against').length * 2 >= lost.length ? 'most went against the higher timeframe.' : 'no single cause dominates yet.'));
+  if (o.extra && o.extra.length) { L.push(''); o.extra.forEach(x => L.push(x)); }
   L.push(''); L.push('BEST STRATEGY ON EACH PAIR (long history, tested on data it was not tuned on)');
   (o.bestLines || []).forEach(x => L.push('- ' + x));
   if (!(o.bestLines || []).length) L.push('- not checked yet, it runs in the background');

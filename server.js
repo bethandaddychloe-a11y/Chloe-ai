@@ -9,6 +9,7 @@ const E = require('./engine.js');
 const MACRO = require('./macro.js');
 const INTEL = require('./intel.js');
 const CHAT = require('./chat.js');
+const TRACK = require('./track.js');
 
 const ENV = process.env;
 const CFG = {
@@ -60,7 +61,7 @@ async function loadState() {
   if (UP.url && UP.token) { try { const v = await upstash(['GET', 'chloe_state']); if (v) { Object.assign(state, JSON.parse(v)); loadedFrom = 'Upstash'; } } catch (e) { storeErr = e.message; } }
   state.paper = state.paper || { trades: [], keys: {}, seq: 0 };
   state.forecasts = state.forecasts || {};
-  state.alerts = state.alerts || {}; state.counts = state.counts || {}; state.valid = state.valid || {}; state.rules = state.rules || {}; state.paused = !!state.paused; state.llmUse = state.llmUse || {};
+  state.alerts = state.alerts || {}; state.counts = state.counts || {}; state.valid = state.valid || {}; state.rules = state.rules || {}; state.paused = !!state.paused; state.aplus = !!state.aplus; state.my = state.my || { seq: 0, list: [] }; state.llmUse = state.llmUse || {};
   AUTO.init();
 }
 async function saveState() {
@@ -246,6 +247,11 @@ async function telegramAsk(text, id) {
   if (!(CFG.tgToken && CFG.tgChat)) return false;
   try { const j = await tgCall('sendMessage', { chat_id: CFG.tgChat, text, reply_markup: { inline_keyboard: [[{ text: '\u2705 Lock it in', callback_data: 'ok:' + id }, { text: '\u274C Skip', callback_data: 'no:' + id }]] } }); return !!j.ok; } catch (e) { return false; }
 }
+async function telegramEnter(text, pid) {
+  if (!pid) return telegram(text);
+  if (!(CFG.tgToken && CFG.tgChat)) return false;
+  try { const j = await tgCall('sendMessage', { chat_id: CFG.tgChat, text, reply_markup: { inline_keyboard: [[{ text: '\u2705 I entered this trade', callback_data: 'en:' + pid }]] } }); return !!j.ok; } catch (e) { return false; }
+}
 async function ensureWebhook() {
   if (tgHook.ok || !CFG.tgToken) return;
   const base = (ENV.PUBLIC_URL || ENV.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
@@ -262,6 +268,13 @@ async function handleTg(update) {
   }
   const cq = update && update.callback_query; if (!cq || !cq.message) return;
   if (String(cq.message.chat && cq.message.chat.id) !== String(CFG.tgChat)) return; // only your own chat can answer
+  const en = /^en:(\d+)$/.exec(cq.data || '');
+  if (en) {
+    const r = enterTrade({ sigId: +en[1] });
+    await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: r.error ? String(r.error).slice(0, 190) : 'Tracking it at the signal price. Open the Progress tab to set your real entry.', show_alert: !!r.error });
+    if (!r.error) { await tgCall('editMessageReplyMarkup', { chat_id: cq.message.chat.id, message_id: cq.message.message_id, reply_markup: { inline_keyboard: [] } }); await saveState(); }
+    return;
+  }
   const m = /^(ok|no):(\d+)$/.exec(cq.data || ''); if (!m) return;
   const r = m[1] === 'ok' ? await AUTO.approve(+m[2]) : await AUTO.decline(+m[2]);
   await tgCall('answerCallbackQuery', { callback_query_id: cq.id, text: r.ok ? (m[1] === 'ok' ? 'Locked in. Sending it to MT5.' : 'Skipped.') : String(r.error).slice(0, 190), show_alert: !r.ok });
@@ -276,7 +289,7 @@ function recordPaper(kind, sym, tf, sg, sigT, conf, strat, tags) {
   if (P.keys[key]) return false;
   P.keys[key] = Date.now();
   P.trades.push({ id: ++P.seq, kind, sym, tf, dir: sg.dir, strat, conf, sigT, at: Date.now(), plan: { sl: sg.plan.sl, tps: sg.plan.tps.map(t => t.p), ref: sg.plan.entry }, status: 'open', fill: null, doneT: null, bars: 0, res: { tp1: null, tp2: null, tp3: null }, cost: PAPER_COST[kind], tags: tags || null, mae: null, mfe: null });
-  return true;
+  return P.seq;
 }
 /* cs must hold closed candles only, oldest first. Mutates and returns the trade. */
 function resolveTrade(t, cs) {
@@ -405,6 +418,118 @@ function gateFor(sym, tf, stratName, tags, fr) {
   return null;
 }
 
+
+/* ---------- A+ only mode: every setup is flagged, and with the mode on only the strict ones are alerted ---------- */
+const APLUS_CONF = 60;
+function aplusCheck(sym, tf, stratName, tags, conf) {
+  const miss = [], t = tags || {};
+  if (t.htf !== 'with') miss.push('not with the higher timeframe');
+  if (t.news) miss.push('news is near');
+  if (!['London', 'London and New York', 'New York'].includes(t.session)) miss.push('outside the London and New York sessions');
+  if (conf < APLUS_CONF) miss.push('confidence under ' + APLUS_CONF + '%');
+  const r = validRow(sym, tf, stratName); if (r && r.label === 'unproven') miss.push('this strategy failed the history exam on this pair');
+  return { ok: miss.length === 0, miss };
+}
+function paperIdFor(sym, tf, dir, strat, sigT) { const t = state.paper.trades.find(x => x.sym === sym && x.tf === tf && x.dir === dir && x.strat === strat && x.sigT === sigT); return t ? t.id : 0; }
+const apLine = ap => ap.ok ? 'A+ setup: all the strict filters pass' : 'Not A+: ' + ap.miss.join('; ');
+
+/* ---------- trades you actually entered (the Progress tab) ---------- */
+const myOpen = () => state.my.list.filter(t => t.status === 'open');
+function enterTrade(b) {
+  const p = state.paper.trades.find(x => x.id === +b.sigId); if (!p) return { error: 'That signal is no longer in the journal.' };
+  if (myOpen().some(x => x.sigId === p.id)) return { error: 'You are already tracking this one.' };
+  const sg = p.dir === 'BUY' ? 1 : -1, entry = b.entry != null && b.entry !== '' ? +b.entry : p.plan.ref, sl = b.sl != null && b.sl !== '' ? +b.sl : p.plan.sl;
+  if (!isFinite(entry) || !isFinite(sl) || entry <= 0 || sl <= 0) return { error: 'Entry and stop must be numbers.' };
+  if ((entry - sl) * sg <= 0) return { error: 'Your entry is on the wrong side of the stop for a ' + p.dir + '.' };
+  if (p.plan.ref && Math.abs(entry - p.plan.ref) / p.plan.ref > 0.05) return { error: 'That entry is more than 5% away from the signal price. Check for a typing slip.' };
+  const t = { id: ++state.my.seq, sigId: p.id, sym: p.sym, tf: p.tf, kind: p.kind, dir: p.dir, strat: p.strat, conf: p.conf, entry, sl, sl0: sl, slAt: 0, tps: p.plan.tps.slice(), tpSkip: {}, enteredAt: Date.now() - Math.max(0, Math.min(240, +b.minutesAgo || 0)) * 60000, status: 'open', adds: [], hits: { tp1: null, tp2: null, tp3: null }, maxR: 0, minR: 0, notified: {} };
+  t.tps.forEach((tp, i) => { if ((tp - entry) * sg <= 0) t.tpSkip['tp' + (i + 1)] = true; });
+  state.my.list.push(t);
+  if (state.my.list.length > 80) state.my.list = state.my.list.filter(x => x.status === 'open').concat(state.my.list.filter(x => x.status !== 'open').slice(-50));
+  return { ok: true, trade: t };
+}
+function closeMy(id, exit) {
+  const t = state.my.list.find(x => x.id === +id && x.status === 'open'); if (!t) return { error: 'No open tracked trade with that number.' };
+  const px = +exit; if (!isFinite(px) || px <= 0) return { error: 'Give the price you closed at.' };
+  const sg = t.dir === 'BUY' ? 1 : -1, dist = Math.abs(t.entry - t.sl0);
+  t.status = 'closed'; t.exit = px; t.exitAt = Date.now(); t.r = Math.round((px - t.entry) * sg / dist * 100) / 100; t.result = 'closed by you'; t.auto = false;
+  return { ok: true, trade: t };
+}
+function untrackMy(id) {
+  const i = state.my.list.findIndex(x => x.id === +id && x.status === 'open'); if (i < 0) return { error: 'No open tracked trade with that number.' };
+  state.my.list.splice(i, 1); return { ok: true };
+}
+function addMy(id, price, size) {
+  const t = state.my.list.find(x => x.id === +id && x.status === 'open'); if (!t) return { error: 'No open tracked trade with that number.' };
+  const px = +price; if (!isFinite(px) || px <= 0) return { error: 'Give the price of the added position.' };
+  if ((t.adds || []).length >= 2) return { error: 'Two adds is the limit for one trade.' };
+  t.adds.push({ price: px, size: +size > 0 ? +size : 0.5, at: Date.now() }); return { ok: true, trade: t };
+}
+function stopMy(id, sl) {
+  const t = state.my.list.find(x => x.id === +id && x.status === 'open'); if (!t) return { error: 'No open tracked trade with that number.' };
+  const v = +sl, sg = t.dir === 'BUY' ? 1 : -1; if (!isFinite(v) || v <= 0) return { error: 'Give the new stop price.' };
+  if ((v - t.sl) * sg < 0) return { error: 'Chloe will not help widen a stop. A stop only moves toward profit.' };
+  t.sl = v; t.slAt = Date.now(); t.notified = {}; return { ok: true, trade: t };
+}
+async function viewMy(t) {
+  curDec = (INSTR[t.sym] || { dec: 5 }).dec; TRACK.setDec(curDec);
+  const raw = await getCandles(t.sym, 'M15', 150), cs15 = dropForming(raw, 'M15'), fr = INTEL.freshness(t.sym, 'M15', cs15, Date.now(), raw.fellBack);
+  const price = raw[raw.length - 1].c; TRACK.replay(t, raw);
+  const live = fr.status === 'fresh';
+  if (t.status === 'closed') return Object.assign({}, t, { price, live, fresh: fr, P: TRACK.progressOf(t, t.exit), advice: null });
+  let cs = cs15, op = null, htf = null;
+  try { const stf = t.kind === 'swing' ? 'H1' : t.tf; cs = dropForming(await getCandles(t.sym, stf, 200), stf); } catch (e) {}
+  try { const a = await analyse(t.sym, t.tf); if (a.fr.status !== 'stale') { op = { dir: a.sg.dir, conf: a.sg.conf }; htf = a.sg.htf || null; } } catch (e) {}
+  const advice = TRACK.advise(t, price, cs, op, htf, live);
+  return Object.assign({}, t, { price, live, fresh: fr, P: advice.P, advice: { action: advice.action, headline: advice.headline, reasons: advice.reasons, scale: advice.scale, level: advice.level } });
+}
+const trLine = v => v.dir + ' ' + v.sym + ' ' + v.tf + ' (' + v.strat + ')';
+async function trackJob() {
+  const out = [];
+  const watchList = state.my.list.filter(t => t.status === 'open' || (t.auto && t.status === 'closed' && !(t.notified || {}).closed && Date.now() - (t.exitAt || 0) < 86400000)).slice(0, 8);
+  for (const t of watchList) {
+    try {
+      const v = await viewMy(t), n = t.notified = t.notified || {}, say = async (k, msg, hrs) => { if (n[k] && Date.now() - n[k] < (hrs || 6) * 3600000) return; n[k] = Date.now(); await telegram(msg); out.push(t.id + ':' + k); };
+      const head = 'CHLOE TRACK #' + t.id + ': ' + trLine(v) + ', entry ' + t.entry + ', now ' + v.price;
+      if (t.status === 'closed') { await say('closed', head + '\n' + t.result.toUpperCase() + ' (' + TRACK.sgnR(t.r) + '). Tracking has stopped. Log the result in the Progress tab if your broker differs.', 99999); continue; }
+      ['tp1', 'tp2', 'tp3'].forEach(k => { /* queued below */ });
+      for (const k of ['tp1', 'tp2', 'tp3']) if (t.hits[k] && !t.tpSkip[k]) await say('hit' + k, head + '\n' + k.toUpperCase() + ' has been touched. ' + (v.advice ? v.advice.headline : ''), 99999);
+      const a = v.advice; if (!a || !v.live) continue;
+      if (['EXIT', 'CLOSE', 'MOVE_STOP', 'TRAIL'].includes(a.action)) await say('act:' + a.action, head + ', ' + TRACK.sgnR(v.P.R) + '\n' + a.action.replace('_', ' ') + ': ' + a.headline + '\n' + a.reasons.map(r => '- ' + r).join('\n'), a.action === 'EXIT' ? 3 : 6);
+      else if (a.scale && a.scale.ok) await say('scale:' + (t.adds || []).length, head + '\n' + a.scale.text + '\nIf you add, tell me with /added ' + t.sym.toLowerCase() + ' <price>.', 12);
+    } catch (e) { out.push(t.id + ':error ' + e.message); }
+  }
+  return out;
+}
+const pctText = v => v.P.pct == null ? 'n/a' : (v.P.pct >= 0 ? '+' : '') + v.P.pct + '%';
+async function cmdProgress() {
+  const open = myOpen(); if (!open.length) return 'CHLOE PROGRESS: no trades tracked. When an alert arrives, tap "I entered this trade" under it, or send /entered gold 2345.6 with your price.';
+  const L = ['CHLOE PROGRESS (' + open.length + ' open)'];
+  for (const t of open.slice(0, 6)) { const v = await viewMy(t); L.push('#' + t.id + ' ' + trLine(v) + ': entry ' + t.entry + ', now ' + v.price + ', ' + TRACK.sgnR(v.P.R) + ' (' + pctText(v) + (v.P.R >= 0 ? ' of the way to the main target' : ' of the risked amount') + ')'); if (v.advice) { L.push('   ' + v.advice.action + ': ' + v.advice.headline); } if (!v.live) L.push('   price not live right now'); }
+  await saveState(); return L.join('\n');
+}
+function symTrade(sym, openOnly) { return openOnly ? myOpen().filter(t => t.sym === sym).slice(-1)[0] : state.paper.trades.filter(t => t.sym === sym && !t.void && Date.now() - t.at < 3 * 86400000 && !myOpen().some(m => m.sigId === t.id)).slice(-1)[0]; }
+async function cmdEntered(sym, px) {
+  const p = symTrade(sym, false); if (!p) return 'I have no recent ' + sym + ' signal to attach that to. Signals from the last 3 days can be tracked.';
+  const r = enterTrade({ sigId: p.id, entry: px }); if (r.error) return r.error; await saveState();
+  return 'Tracking ' + trLine(p) + ' from ' + r.trade.entry + ', stop ' + r.trade.sl + '. Open the Progress tab to see it, or send /progress.';
+}
+async function cmdClosed(sym, px) {
+  const t = symTrade(sym, true); if (!t) return 'You have no open tracked ' + sym + ' trade.'; if (px == null) return 'Send the price you closed at, like /closed ' + sym.toLowerCase() + ' 2350.5';
+  const r = closeMy(t.id, px); if (r.error) return r.error; await saveState(); return 'Logged: ' + trLine(t) + ' closed at ' + px + ' for ' + TRACK.sgnR(t.r) + '.';
+}
+async function cmdAdded(sym, px) {
+  const t = symTrade(sym, true); if (!t) return 'You have no open tracked ' + sym + ' trade.'; if (px == null) return 'Send the price you added at, like /added ' + sym.toLowerCase() + ' 2352';
+  const r = addMy(t.id, px); if (r.error) return r.error; await saveState(); return 'Logged the add on #' + t.id + ' at ' + px + ' (half size).';
+}
+function cmdAplus(args, control) {
+  const w = (args[0] || '').toLowerCase();
+  if (w === 'on' || w === 'off') { if (!control) return 'Changing the mode needs your admin token or your Telegram chat.'; state.aplus = w === 'on'; saveState(); return state.aplus ? 'A+ only mode is ON. Chloe still records every setup, but alerts you only when all the strict filters pass: with the higher timeframe, no news near, London or New York session, confidence ' + APLUS_CONF + '%+, and not a strategy that failed the history exam.' : 'A+ only mode is OFF. You get every alert again.'; }
+  const cl = state.paper.trades.filter(t => t.status === 'closed' && !t.void && typeof t.res.tp2 === 'number' && t.tags), ap = cl.filter(t => t.tags.aplus), ot = cl.filter(t => !t.tags.aplus);
+  const f = (n, l) => { const s = INTEL.stats(l.map(t => t.res.tp2)); return n + ': ' + s.n + ' finished, ' + (s.n ? Math.round(s.winRate * 100) + '% won, ' + INTEL.sgnR(s.avgR) + ' average' : 'none yet'); };
+  return ['CHLOE A+ MODE: ' + (state.aplus ? 'ON' : 'OFF') + ' (send /aplus on or /aplus off)', f('A+ setups', ap), f('Other setups', ot), 'Every setup is recorded either way, so this compares them fairly. Wait for 30 or more finished A+ setups before trusting the difference.'].join('\n');
+}
+
 /* ---------- long-history validation, run in the background one pair at a time ---------- */
 const VAL_SIZE = { M5: 4000, M15: 4000, H1: 3000, H4: 2000, D1: 1500 }, vq = [], vErr = {};
 let vRunning = false;
@@ -445,10 +570,18 @@ function bestPerPair(tf) {
 }
 
 /* ---------- daily report ---------- */
+function myExtra(now) {
+  const off = CFG.tzOffset, day = INTEL.dayKeyOf(now, off), closed = state.my.list.filter(t => t.status === 'closed' && t.exitAt && INTEL.dayKeyOf(t.exitAt, off) === day), open = myOpen();
+  if (!closed.length && !open.length) return [];
+  const won = closed.filter(t => t.r > 0), sum = closed.reduce((a, t) => a + (t.r || 0), 0);
+  const L = ['YOUR CONFIRMED TRADES (Progress tab)', 'Closed today: ' + closed.length + ' (' + won.length + ' in profit, ' + (closed.length - won.length) + ' not), total ' + TRACK.sgnR(sum) + '. Still open: ' + open.length + '.'];
+  closed.slice(0, 6).forEach(t => L.push('- ' + trLine(t) + ': ' + TRACK.sgnR(t.r) + ', ' + t.result));
+  return L;
+}
 function buildDayReport(now) {
   now = now || Date.now();
   const day = INTEL.dayKeyOf(now, CFG.tzOffset), L = INTEL.learn(state.paper.trades, 'tp2', state.rules);
-  return INTEL.dayReport({ trades: state.paper.trades, now, off: CFG.tzOffset, tp: 'tp2', counts: state.counts[day] || {}, pairs: PAIRS, bestLines: bestPerPair('H4').map(b => b.line), pendingLearn: L.suggestions.filter(s => s.status === 'pending').length });
+  return INTEL.dayReport({ trades: state.paper.trades, now, off: CFG.tzOffset, tp: 'tp2', counts: state.counts[day] || {}, extra: myExtra(now), pairs: PAIRS, bestLines: bestPerPair('H4').map(b => b.line), pendingLearn: L.suggestions.filter(s => s.status === 'pending').length });
 }
 async function sendDayReport(force) {
   const day = INTEL.dayKeyOf(Date.now(), CFG.tzOffset);
@@ -492,10 +625,13 @@ async function swingAlerts() {
         if (block) { out.push({ sym, tf, result: 'blocked: ' + block }); continue; }
         bump('found');
         const key = [sym, tf, sg.dir, sg.strat, cs[cs.length - 1].t].join('|');
-        if (recordPaper('swing', sym, tf, sg, cs[cs.length - 1].t, sg.conf, sg.stratName, Object.assign({}, tags, { htf: INTEL.ctxTags({ dir: sg.dir, htf: sg.htf, ms: Date.now() }).htf }))) { queueValidation(sym, tf); AUTO.offer({ kind: 'swing', sym, tf, dir: sg.dir, conf: sg.conf, strat: sg.stratName, plan: sg.plan, stale: null, proven: provenFor(sym, tf, sg.stratName) }); }
-        if (!state.sent[key]) {
-          const d = INSTR[sym].dec;
-          const ok = await telegram(['CHLOE AI: POSSIBLE TRADE', sg.dir + ' ' + sym + ' ' + tf + ', ' + sg.conf + '% confidence', 'Strategy: ' + sg.stratName, ...planLines(sym, sg.plan, d), whyOf(sg.checks), hitLine(sym, tf, sg.stratName), 'Data: newest closed candle ' + fr.ageMin + ' min old (' + fr.status + ')', DISCLAIMER].join('\n'));
+        const tg2 = Object.assign({}, tags, { htf: INTEL.ctxTags({ dir: sg.dir, htf: sg.htf, ms: Date.now() }).htf }), ap = aplusCheck(sym, tf, sg.stratName, tg2, sg.conf), quiet = state.aplus && !ap.ok;
+        tg2.aplus = ap.ok;
+        if (recordPaper('swing', sym, tf, sg, cs[cs.length - 1].t, sg.conf, sg.stratName, tg2)) { queueValidation(sym, tf); if (!quiet) AUTO.offer({ kind: 'swing', sym, tf, dir: sg.dir, conf: sg.conf, strat: sg.stratName, plan: sg.plan, stale: null, proven: provenFor(sym, tf, sg.stratName) }); }
+        if (quiet) { bump('quiet'); status += ' (recorded only: ' + ap.miss[0] + ')'; }
+        else if (!state.sent[key]) {
+          const d = INSTR[sym].dec, pid = paperIdFor(sym, tf, sg.dir, sg.stratName, cs[cs.length - 1].t);
+          const ok = await telegramEnter(['CHLOE AI: POSSIBLE TRADE', sg.dir + ' ' + sym + ' ' + tf + ', ' + sg.conf + '% confidence', 'Strategy: ' + sg.stratName, ...planLines(sym, sg.plan, d), whyOf(sg.checks), hitLine(sym, tf, sg.stratName), 'Data: newest closed candle ' + fr.ageMin + ' min old (' + fr.status + ')', apLine(ap), pid ? 'Signal #' + pid + '. If you take it, tap the button below, or use the Progress tab to give your own entry price.' : '', DISCLAIMER].filter(Boolean).join('\n'), pid);
           if (ok) { state.sent[key] = Date.now(); status += ' (alert sent)'; }
         }
       } else if (fr.status === 'stale') { bump('stale'); gateFor(sym, tf, '', tags, fr); status = 'blocked: stale data'; }
@@ -521,12 +657,14 @@ async function scalpAlerts() {
         const dayKey = sym + '|' + today(), key = ['S', sym, tf, a.dir, cs[cs.length - 1].t].join('|');
         const cool = Date.now() - (state.lastScalp[sym] || 0) < CFG.scalpCooldownMin * 60000;
         let fresh = false;
+        const ap = aplusCheck(sym, tf, a.name, tags, a.conf), quiet = state.aplus && !ap.ok; tags.aplus = ap.ok;
         if (!cool && (state.scalpDay[dayKey] || 0) < CFG.scalpMaxPerDay && recordPaper('scalp', sym, tf, { dir: a.dir, plan: a.plan }, cs[cs.length - 1].t, a.conf, a.name, tags)) {
-          fresh = true; bump('found'); queueValidation(sym, tf); AUTO.offer({ kind: 'scalp', sym, tf, dir: a.dir, conf: a.conf, strat: a.name, plan: a.plan, stale: null, proven: provenFor(sym, tf, a.name) }); state.lastScalp[sym] = Date.now(); state.scalpDay[dayKey] = (state.scalpDay[dayKey] || 0) + 1;
+          fresh = true; bump('found'); queueValidation(sym, tf); if (!quiet) AUTO.offer({ kind: 'scalp', sym, tf, dir: a.dir, conf: a.conf, strat: a.name, plan: a.plan, stale: null, proven: provenFor(sym, tf, a.name) }); state.lastScalp[sym] = Date.now(); state.scalpDay[dayKey] = (state.scalpDay[dayKey] || 0) + 1;
         }
-        if (fresh && !state.sent[key]) {
-          const d = INSTR[sym].dec;
-          const ok = await telegram(['CHLOE AI: SCALP', a.dir + ' ' + sym + ' ' + tf + ', ' + a.conf + '% confidence', 'Strategy: ' + a.name, ...planLines(sym, a.plan, d), 'History on these candles: ' + a.stats.n + ' trades, ' + (a.stats.n ? Math.round(a.stats.w / a.stats.n * 100) + '% won' : 'none'), hitLine(sym, tf, a.name), whyOf(a.checks), 'Scalps are fast and spread matters. ' + DISCLAIMER].join('\n'));
+        if (fresh && quiet) { bump('quiet'); status += ' (recorded only: ' + ap.miss[0] + ')'; }
+        else if (fresh && !state.sent[key]) {
+          const d = INSTR[sym].dec, pid = paperIdFor(sym, tf, a.dir, a.name, cs[cs.length - 1].t);
+          const ok = await telegramEnter(['CHLOE AI: SCALP', a.dir + ' ' + sym + ' ' + tf + ', ' + a.conf + '% confidence', 'Strategy: ' + a.name, ...planLines(sym, a.plan, d), 'History on these candles: ' + a.stats.n + ' trades, ' + (a.stats.n ? Math.round(a.stats.w / a.stats.n * 100) + '% won' : 'none'), hitLine(sym, tf, a.name), whyOf(a.checks), apLine(ap), pid ? 'Signal #' + pid + '. If you take it, tap the button below, or use the Progress tab.' : '', 'Scalps are fast and spread matters. ' + DISCLAIMER].filter(Boolean).join('\n'), pid);
           if (ok) { state.sent[key] = Date.now(); status += ' (alert sent)'; }
         }
       }
@@ -549,6 +687,7 @@ async function runJobs(mode) {
   if (all || mode === 'swing') res.swing = await swingAlerts();
   if (all || mode === 'scalp') res.scalp = await scalpAlerts();
   res.paper = await resolvePaper();
+  if (all || mode === 'track') res.track = await trackJob();
   if (all) {
     PAIRS.forEach(sym => queueValidation(sym, 'H4')); CFG.scalpWatch.forEach(it => { const [sy, tf] = it.split(':'); queueValidation(sy, (tf || 'M5').toUpperCase()); });
     const lh = new Date(Date.now() + CFG.tzOffset * 3600000).getUTCHours();
@@ -575,6 +714,7 @@ async function cmdStatus() {
   L.push('Storage: ' + storageTest.note + '.');
   L.push('Twelve Data credits today: ' + (credits.day === today() ? credits.n : 0) + ' of ' + CFG.creditLimit + '. Strategy: ' + nameOf(CFG.stratMode) + '.');
   L.push(paperLine());
+  L.push('A+ only mode: ' + (state.aplus ? 'ON' : 'off') + '. Trades you are tracking: ' + myOpen().length + '.');
   const ok = Object.keys(state.valid).length; L.push('Long-history checks done: ' + ok + (vq.length ? ', ' + vq.length + ' waiting' : '') + '.');
   return L.join('\n');
 }
@@ -700,6 +840,14 @@ async function runCommand(text, control) {
       case 'learn': return cmdLearn(q.args, control);
       case 'validate': return cmdValidate(sym, tf);
       case 'best': return cmdBest(q.tf || 'H4');
+      case 'progress': return await cmdProgress();
+      case 'aplus': return cmdAplus(q.args, control);
+      case 'entered': case 'closed': case 'added': {
+        if (!control) return 'Logging trades needs your admin token or your Telegram chat.';
+        const nums = q.args.filter(x => /^\d+(\.\d+)?$/.test(x)).map(Number), px = nums.length ? nums[nums.length - 1] : null;
+        const s2 = q.sym || (state.paper.trades.filter(t => !t.void && Date.now() - t.at < 3 * 86400000).slice(-1)[0] || {}).sym || sym;
+        return q.cmd === 'entered' ? await cmdEntered(s2, px) : q.cmd === 'closed' ? await cmdClosed(s2, px) : await cmdAdded(s2, px);
+      }
       case 'report': return buildDayReport().text;
       case 'whatif': return await cmdWhatIf(q.args, q.sym);
       case 'pause': if (!control) return 'Pausing needs your admin token or your Telegram chat.'; state.paused = true; await saveState(); return 'Paused. No alerts or new paper trades until you send /resume. Open paper trades still get tracked.';
@@ -815,6 +963,27 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, buildDayReport());
     }
     if (p === '/api/hit') { const sy = (q.get('symbol') || 'XAUUSD').toUpperCase(), tf = (q.get('tf') || 'H4').toUpperCase(), st = q.get('strategy') || '', r = /^[A-Z]{6}$|^USTEC$/.test(sy) ? validRow(sy, tf, st) : null; return send(res, 200, { line: /^[A-Z]{6}$|^USTEC$/.test(sy) ? hitLine(sy, tf, st) : '', label: r ? r.label : null }); }
+    if (p === '/api/progress' && req.method === 'GET') {
+      const now = Date.now(), mine = state.my.list;
+      const signals = state.paper.trades.filter(t => !t.void && now - t.at < 3 * 86400000).slice(-25).reverse().map(t => ({ id: t.id, kind: t.kind, sym: t.sym, tf: t.tf, dir: t.dir, strat: t.strat, conf: t.conf, at: t.at, plan: t.plan, aplus: !!(t.tags && t.tags.aplus), dec: INSTR[t.sym].dec, tracking: (mine.find(m => m.sigId === t.id && m.status === 'open') || {}).id || null, done: mine.some(m => m.sigId === t.id && m.status === 'closed') }));
+      const open = []; let changed = false;
+      for (const t of myOpen().slice(0, 8)) { try { const v = await viewMy(t); if (t.status !== 'open') changed = true; open.push(Object.assign(v, { dec: INSTR[t.sym].dec })); } catch (e) { open.push(Object.assign({}, t, { error: e.message, P: TRACK.progressOf(t, t.entry), advice: null, dec: INSTR[t.sym].dec })); } }
+      if (changed) await saveState();
+      return send(res, 200, { signals, open: open.filter(v => v.status === 'open'), closed: mine.filter(t => t.status === 'closed').slice(-15).reverse().map(t => Object.assign({}, t, { dec: INSTR[t.sym].dec })), aplus: state.aplus, admin: AUTO.isAdmin(req.headers['x-admin'] || q.get('token')) });
+    }
+    if (p.startsWith('/api/progress/') && req.method === 'POST') {
+      if (!AUTO.isAdmin(req.headers['x-admin'] || q.get('token'))) return send(res, 403, { error: 'admin token needed' });
+      let b = {}; try { b = JSON.parse(await readBody(req) || '{}'); } catch (e) {}
+      const act = p.slice(14), r = act === 'enter' ? enterTrade(b) : act === 'close' ? closeMy(b.id, b.exit) : act === 'stop' ? stopMy(b.id, b.sl) : act === 'add' ? addMy(b.id, b.price, b.size) : act === 'untrack' ? untrackMy(b.id) : { error: 'unknown action' };
+      if (r.error) return send(res, 400, { error: r.error });
+      await saveState(); return send(res, 200, { ok: true, trade: r.trade || null });
+    }
+    if (p === '/api/aplus' && req.method === 'POST') {
+      if (!AUTO.isAdmin(req.headers['x-admin'] || q.get('token'))) return send(res, 403, { error: 'admin token needed' });
+      let b = {}; try { b = JSON.parse(await readBody(req) || '{}'); } catch (e) {}
+      state.aplus = !!b.on; await saveState(); return send(res, 200, { ok: true, aplus: state.aplus });
+    }
+    if (p === '/api/aplus') return send(res, 200, { aplus: state.aplus });
     if (p === '/api/storage-test') return send(res, 200, await runStorageTest());
     if (p === '/api/news') return send(res, 200, await getNews());
     if (p === '/api/paper') return send(res, 200, paperReport(q.get('tp') ? 'tp' + q.get('tp') : 'tp2'));
@@ -827,4 +996,4 @@ const server = http.createServer(async (req, res) => {
   } catch (e) { send(res, /Unsupported/.test(e.message) ? 400 : 502, { error: e.message }); }
 });
 if (require.main === module) ready.then(() => server.listen(CFG.port, () => { console.log('Chloe server on ' + CFG.port); ensureWebhook().catch(() => {}); }));
-module.exports = { INTEL, runCommand, buildDayReport, sendDayReport, queueValidation, pumpValidation, bestPerPair, monitorChecks, runStorageTest, gateFor, hitLine, analyse, AUTO, MACRO, forecasts, server, CFG, runJobs, getCandles, getNews, state, ready, resolveTrade, recordPaper, paperReport, statsOf };
+module.exports = { aplusCheck, paperIdFor, TRACK, enterTrade, closeMy, trackJob, viewMy, cmdProgress, INTEL, runCommand, buildDayReport, sendDayReport, queueValidation, pumpValidation, bestPerPair, monitorChecks, runStorageTest, gateFor, hitLine, analyse, AUTO, MACRO, forecasts, server, CFG, runJobs, getCandles, getNews, state, ready, resolveTrade, recordPaper, paperReport, statsOf };
