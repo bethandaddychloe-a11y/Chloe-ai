@@ -397,6 +397,7 @@ details[open] summary{margin-bottom:10px}
       <button class="btn" data-go="test">Backtest</button>
       <button class="btn" data-go="journal">Journal</button>
       <button class="btn" data-go="ask">Ask Chloe</button>
+      <button class="btn" data-go="chartcheck">Chart check</button>
       <button class="btn" data-go="broker">Broker</button>
     </div>
   </div>
@@ -429,6 +430,19 @@ details[open] summary{margin-bottom:10px}
   <div class="card"><h2>My open trades</h2><div id="pgOpen" class="note">Loading...</div></div>
   <div class="card"><h2>Signals Chloe sent</h2><p class="note" style="margin-top:0">Last 3 days. Tap one, then confirm the price you entered at, even if it differs from the signal.</p><div id="pgSig" class="note">Loading...</div></div>
   <div class="card"><h2>Finished trades</h2><div id="pgDone" class="note">Loading...</div></div>
+</section>
+
+<section class="panel" id="p-chartcheck" hidden>
+  <div class="card">
+    <h2>Chart check</h2>
+    <p class="note" style="margin-top:0">Pick a pair and timeframe and Chloe reads the live candles in plain words: trend, higher timeframe, levels, zones, and what each strategy says. Add a screenshot of your own chart and, if the server has a vision key, an AI model also describes what it sees. Chloe describes with fixed rules. It does not predict.</p>
+    <div class="row"><label>Pair<select id="ccSym"><option value="XAUUSD">XAUUSD</option><option value="BTCUSD">BTCUSD</option><option value="USDJPY">USDJPY</option><option value="GBPUSD">GBPUSD</option><option value="USTEC">USTEC</option></select></label>
+    <label>Timeframe<select id="ccTf"><option>M5</option><option>M15</option><option selected>H1</option><option>H4</option><option>D1</option></select></label></div>
+    <label style="margin-top:10px">Screenshot (optional)<input id="ccFile" type="file" accept="image/*"></label>
+    <img id="ccPrev" alt="" hidden style="max-width:100%;border-radius:10px;margin-top:10px">
+    <div class="btns" style="margin-top:12px"><button class="btn primary" id="btnCc">Check chart</button><button class="btn" id="btnCcClear">Remove picture</button></div>
+    <pre id="ccOut" class="note" style="white-space:pre-wrap;margin-top:12px;font-family:inherit"></pre>
+  </div>
 </section>
 
 <!-- AUTO -->
@@ -1816,7 +1830,7 @@ function wireNew(){
   renderEvents();setInterval(renderEvents,60000);
 }
 
-var MORE=['data','risk','test','journal','ask','broker'],AC={key:'',sig:null};
+var MORE=['data','risk','test','journal','ask','broker','chartcheck'],AC={key:'',sig:null};
 /* ---------- strategy tab ---------- */
 var STRAT_GUIDE={
   pa:['Reads the last swing highs and lows for trend, looks for an engulfing or pin bar, checks the price is at a proven level with room to the next one, and checks the higher timeframe and your news view.','Stop beyond the nearest swing plus a quarter of the signal candle. Targets at the next levels, at least 0.8R, 1.5R and 2.5R away.'],
@@ -1967,7 +1981,7 @@ function wire2(){
   setInterval(function(){if(SCO.auto&&!$('p-scalp').hidden&&!scBusy&&SC)scalpScan()},300000);
   MORE.forEach(function(id){var p=$('p-'+id),b=el('button','btn','‹ More');b.type='button';b.style.alignSelf='flex-start';b.addEventListener('click',function(){select('more')});p.insertBefore(b,p.firstChild)});
   Array.prototype.forEach.call(document.querySelectorAll('[data-go]'),function(b){b.addEventListener('click',function(){select(b.dataset.go)})});
-  wirePaper();wireAsk();wireProgress();
+  wirePaper();wireAsk();wireProgress();wireChartCheck();
   renderScalp();
 }
 
@@ -2399,6 +2413,30 @@ function loadBest(){
     box.appendChild(el('div','note',j.note));
   }).catch(function(e){box.textContent='Could not load: '+e.message});
 }
+
+/* ---------- chart check ---------- */
+var CC_IMG=null;
+function ccShrink(file){
+  return new Promise(function(ok,no){
+    var fr=new FileReader();fr.onerror=function(){no(new Error('Could not open the picture'))};
+    fr.onload=function(){var im=new Image();im.onerror=function(){no(new Error('That file is not a picture'))};im.onload=function(){
+      var w=im.width,h=im.height,m=1280;if(w>m||h>m){var k=m/Math.max(w,h);w=Math.round(w*k);h=Math.round(h*k)}
+      var c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(im,0,0,w,h);ok(c.toDataURL('image/jpeg',0.82))};im.src=fr.result};
+    fr.readAsDataURL(file);
+  });
+}
+function wireChartCheck(){
+  $('ccFile').addEventListener('change',function(){
+    var f=$('ccFile').files[0];if(!f)return;
+    ccShrink(f).then(function(d){CC_IMG=d;$('ccPrev').src=d;$('ccPrev').hidden=false}).catch(function(e){CC_IMG=null;$('ccOut').textContent=e.message});
+  });
+  $('btnCcClear').addEventListener('click',function(){CC_IMG=null;$('ccFile').value='';$('ccPrev').hidden=true;$('ccPrev').removeAttribute('src')});
+  $('btnCc').addEventListener('click',function(){
+    var o=$('ccOut');o.textContent='Reading the chart...';
+    api('/api/chartcheck','POST',{symbol:$('ccSym').value,tf:$('ccTf').value,image:CC_IMG||undefined}).then(function(j){o.textContent=j.text||j.error||'No answer'}).catch(function(e){o.textContent='Could not reach the server: '+e.message});
+  });
+}
+
 function wireAsk(){
   $('btnChl').addEventListener('click',function(){askRun($('askIn').value)});
   $('askIn').addEventListener('keydown',function(e){if(e.key==='Enter')askRun($('askIn').value)});
@@ -2575,7 +2613,7 @@ var TVINT={M1:'1',M5:'5',M15:'15',H1:'60',H4:'240',D1:'D'};
 function updateTv(){var sy=TVSYM[S.sym]||('OANDA:'+L());$('tvLink').setAttribute('href','https://www.tradingview.com/chart/?symbol='+encodeURIComponent(sy)+'&interval='+TVINT[S.tf])}
 
 /* tabs */
-var TABS=['signal','scalp','strat','news','auto','broker','more','data','risk','test','journal','ask','progress'];
+var TABS=['signal','scalp','strat','news','auto','broker','more','data','risk','test','journal','ask','progress','chartcheck'];
 function select(name){
   TABS.forEach(function(t){$('p-'+t).hidden=t!==name});
   var navName=MORE.indexOf(name)>=0?'more':name;
