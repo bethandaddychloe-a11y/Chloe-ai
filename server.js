@@ -22,7 +22,7 @@ const CFG = {
   maToken: ENV.METAAPI_TOKEN || '', maAcc: ENV.METAAPI_ACCOUNT_ID || '', maRegion: ENV.METAAPI_REGION || 'new-york',
   minScore: +(ENV.MIN_SCORE || 5),
   ndx: +(ENV.NDX_RATIO || 41.1),
-  btcSource: (ENV.BTC_SOURCE || 'binance').toLowerCase(),
+  btcSource: (ENV.BTC_SOURCE || 'td').toLowerCase(),
   sodHour: +(ENV.SOD_HOUR_UTC || 5),
   stratMode: (ENV.STRATEGY || 'sweep').trim(),
   watch: (ENV.WATCH || 'XAUUSD:H4,XAUUSD:H1,GBPUSD:H4,GBPUSD:H1,USDJPY:H4,USDJPY:H1,BTCUSD:H4,BTCUSD:H1,USTEC:H4,USTEC:H1').split(',').map(s => s.trim()).filter(Boolean),
@@ -34,6 +34,7 @@ const CFG = {
   llmKey: ENV.ANTHROPIC_API_KEY || '', llmModel: ENV.LLM_MODEL || 'claude-haiku-5-5', llmDaily: +(ENV.LLM_DAILY_LIMIT || 20),
   tdPerMin: +(ENV.TD_PER_MIN || 8), creditLimit: +(ENV.TD_DAILY_LIMIT || 800),
   finnhubKey: ENV.FINNHUB_API_KEY || '', avKey: ENV.ALPHAVANTAGE_API_KEY || '', fredKey: ENV.FRED_API_KEY || '', avMaxDay: +(ENV.AV_MAX_PER_DAY || 12),
+  tdOnly: (ENV.TD_ONLY == null ? 'XAUUSD,USTEC' : ENV.TD_ONLY).split(',').map(x => x.trim().toUpperCase()).filter(Boolean),
   fastOrder: (ENV.FAST_ORDER || 'yahoo,td').split(',').map(x => x.trim().toLowerCase()).filter(x => x === 'td' || x === 'yahoo'),
   dataOrder: (ENV.DATA_ORDER || 'td,yahoo').split(',').map(x => x.trim().toLowerCase()).filter(x => x === 'td' || x === 'yahoo'),
   calUrl: ENV.CALENDAR_URL || 'https://nfs.faireconomy.media/ff_calendar_thisweek.json',
@@ -48,7 +49,7 @@ const INSTR = {
 const TF_TD = { M1: '1min', M5: '5min', M15: '15min', H1: '1h', H4: '4h', D1: '1day' };
 const TF_BN = { M1: '1m', M5: '5m', M15: '15m', H1: '1h', H4: '4h', D1: '1d' };
 const TF_MIN = { M1: 1, M5: 5, M15: 15, H1: 60, H4: 240, D1: 1440 };
-const TTL = { M1: 55, M5: 110, M15: 290, H1: 590, H4: 1750, D1: 3500 };
+const TTL = { M1: 55, M5: 240, M15: 600, H1: 1800, H4: 3000, D1: 3500 }; // longer waits keep the free Twelve Data credits for the whole day
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const doFetch = (...a) => global.fetch(...a);
 
@@ -130,7 +131,7 @@ async function getCandles(sym, tf, size) {
   const key = sym + '|' + tf + '|' + size, hit = cache.get(key);
   const ttl = (size > 500 ? 6 * 3600 : TTL[tf]) * 1000;
   if (hit && Date.now() - hit.at < ttl) return hit.cs;
-  const base = ['M5', 'M15', 'H1'].includes(tf) && CFG.fastOrder.length ? CFG.fastOrder : (CFG.dataOrder.length ? CFG.dataOrder : ['td']); // fast charts ask Yahoo first so the free Twelve Data credits last the day
+  const base = CFG.tdOnly.includes(sym) ? ['td'] : ['M5', 'M15', 'H1'].includes(tf) && CFG.fastOrder.length ? CFG.fastOrder : (CFG.dataOrder.length ? CFG.dataOrder : ['td']); // gold and Nasdaq stay on Twelve Data: Yahoo has no matching gold price and its Nasdaq is a futures price // fast charts ask Yahoo first so the free Twelve Data credits last the day
   const order = sym === 'BTCUSD' && CFG.btcSource !== 'td' ? ['binance'].concat(base) : base;
   let err = null;
   for (const src of order) {
@@ -289,6 +290,7 @@ async function analyse(sym, tf, mode) {
   if (fr.status === 'stale' && sg.dir !== 'WAIT') { sg.blockedStale = fr.reason; sg.dir = 'WAIT'; }
   return { sg, cs, fr };
 }
+const usOpen = (ms = Date.now()) => { const d = new Date(ms), w = d.getUTCDay(), m = d.getUTCHours() * 60 + d.getUTCMinutes(); return w >= 1 && w <= 5 && m >= 14 * 60 + 30 && m <= 19 * 60 + 30; }; // Nasdaq proxy trades in US hours, so a stale reading outside them is expected and not worth an alert
 const num = (x, d) => Number(x).toFixed(d);
 function planLines(sym, p, d) {
   return ['Entry ' + num(p.entry, d) + '   SL ' + num(p.sl, d) + ' (' + num(p.dist / INSTR[sym].pip, 1) + ' pips)', 'TP1 ' + num(p.tps[0].p, d) + '  TP2 ' + num(p.tps[1].p, d) + '  TP3 ' + num(p.tps[2].p, d), 'Lots ' + lots(sym, p.entry, p.dist).toFixed(2) + ' (risk ' + CFG.riskPct + '% of ' + CFG.balance + ')'];
@@ -480,7 +482,7 @@ async function monitorChecks() {
 /* ---------- guards that run before any alert, paper trade or order ---------- */
 function gateFor(sym, tf, stratName, tags, fr) {
   if (state.paused) { bump('paused'); return 'paused by you'; }
-  if (fr.status === 'stale') { bump('stale'); watch('stale:' + sym + ':' + tf, sym + ' ' + tf + ' data is stale (' + fr.reason + '). Alerts, paper trades and orders for it are blocked until fresh candles arrive.'); return 'stale data: ' + fr.reason; }
+  if (fr.status === 'stale') { bump('stale'); if (!(sym === 'USTEC' && !usOpen())) watch('stale:' + sym + ':' + tf, sym + ' ' + tf + ' data is stale (' + fr.reason + '). Alerts, paper trades and orders for it are blocked until fresh candles arrive.'); return 'stale data: ' + fr.reason; }
   if (fr.status === 'closed') return 'market closed';
   const lb = INTEL.learnBlock(state.rules, { sym, strat: stratName, tags });
   if (lb) { bump('learned'); return 'your approved rule says ' + lb; }
@@ -1008,7 +1010,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/' || p === '/index.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(path.join(STATIC_DIR, 'index.html'))); }
     if (p === '/health') {
       const n = newsCache ? newsCache.v : { feeds_ok: 0, feeds_total: CFG.feeds.length };
-      return send(res, 200, { ok: true, twelve_data_key: !!CFG.tdKey, telegram: !!(CFG.tgToken && CFG.tgChat), metaapi: !!(CFG.maToken && CFG.maAcc), btc_source: lastSource.BTCUSD || CFG.btcSource, credits_today: credits.day === today() ? credits.n : 0, credit_limit: CFG.creditLimit, sod_hour_utc: CFG.sodHour, last_sod: state.sod ? state.sod.date + ': ' + state.sod.txt : null, feeds_ok: n.feeds_ok, feeds_total: n.feeds_total, feeds: n.feeds || {}, data_order: CFG.dataOrder, fast_order: CFG.fastOrder, extra_sources: extraRows(), last_sources: lastSource, source_errors: srcErr, calendar: calStatus, tg_buttons: tgHook, watch: CFG.watch, scalp_watch: CFG.scalpWatch, strategy: CFG.stratMode, storage: UP.url ? 'upstash' : 'temp file (may reset on restart)', storage_error: storeErr, data_age: Object.fromEntries(CFG.watch.concat(CFG.scalpWatch).map(it => { const [sy, tf] = it.split(':'); return [it, ageOf(sy, (tf || 'H4').toUpperCase())]; })), storage_test: storageTest, paused: !!state.paused, uptime_min: Math.round((Date.now() - bootAt) / 60000), loaded_from: loadedFrom, validated: Object.keys(state.valid), last_report: state.lastReport || null, llm: !!CFG.llmKey, paper_open: state.paper.trades.filter(t => t.status !== 'closed').length, paper_closed: state.paper.trades.filter(t => t.status === 'closed').length });
+      return send(res, 200, { ok: true, twelve_data_key: !!CFG.tdKey, telegram: !!(CFG.tgToken && CFG.tgChat), metaapi: !!(CFG.maToken && CFG.maAcc), btc_source: lastSource.BTCUSD || CFG.btcSource, credits_today: credits.day === today() ? credits.n : 0, credit_limit: CFG.creditLimit, sod_hour_utc: CFG.sodHour, last_sod: state.sod ? state.sod.date + ': ' + state.sod.txt : null, feeds_ok: n.feeds_ok, feeds_total: n.feeds_total, feeds: n.feeds || {}, data_order: CFG.dataOrder, fast_order: CFG.fastOrder, td_only: CFG.tdOnly, extra_sources: extraRows(), last_sources: lastSource, source_errors: srcErr, calendar: calStatus, tg_buttons: tgHook, watch: CFG.watch, scalp_watch: CFG.scalpWatch, strategy: CFG.stratMode, storage: UP.url ? 'upstash' : 'temp file (may reset on restart)', storage_error: storeErr, data_age: Object.fromEntries(CFG.watch.concat(CFG.scalpWatch).map(it => { const [sy, tf] = it.split(':'); return [it, ageOf(sy, (tf || 'H4').toUpperCase())]; })), storage_test: storageTest, paused: !!state.paused, uptime_min: Math.round((Date.now() - bootAt) / 60000), loaded_from: loadedFrom, validated: Object.keys(state.valid), last_report: state.lastReport || null, llm: !!CFG.llmKey, paper_open: state.paper.trades.filter(t => t.status !== 'closed').length, paper_closed: state.paper.trades.filter(t => t.status === 'closed').length });
     }
     if (p === '/api/candles') {
       const sym = (q.get('symbol') || 'XAUUSD').toUpperCase(), tf = (q.get('tf') || 'H4').toUpperCase();
