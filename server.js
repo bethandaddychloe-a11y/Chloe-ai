@@ -219,7 +219,7 @@ async function scoreFromFred() {
 }
 const extraRows = () => ({
   finnhub: { set: !!CFG.finnhubKey, status: !CFG.finnhubKey ? 'no key (optional)' : !extraSt.finnhub.at ? 'not read yet' : extraSt.finnhub.ok ? extraSt.finnhub.n + ' headlines' : 'problem: ' + extraSt.finnhub.err, ok: !CFG.finnhubKey ? null : !extraSt.finnhub.at ? null : extraSt.finnhub.ok },
-  alphavantage: { set: !!CFG.avKey, status: !CFG.avKey ? 'no key (optional)' : !extraSt.alphavantage.at ? 'not read yet' : (extraSt.alphavantage.ok ? (extraSt.alphavantage.n != null ? extraSt.alphavantage.n + ' stories scored' : 'using last reading') : 'problem: ' + (extraSt.alphavantage.limited ? 'daily limit reached' : extraSt.alphavantage.err)) + (extraSt.alphavantage.note ? ' (' + extraSt.alphavantage.note + ')' : '') + ' [' + avCalls.n + ' of ' + CFG.avMaxDay + ' calls used today]', ok: !CFG.avKey ? null : !extraSt.alphavantage.at ? null : extraSt.alphavantage.ok },
+  alphavantage: { set: !!CFG.avKey, status: !CFG.avKey ? 'no key (optional)' : !extraSt.alphavantage.at ? 'not read yet' : (extraSt.alphavantage.ok ? (extraSt.alphavantage.n != null ? extraSt.alphavantage.n + ' stories scored' : 'using last reading') : 'problem, Alpha Vantage says: ' + (extraSt.alphavantage.err || 'no reason given')) + (extraSt.alphavantage.note ? ' (' + extraSt.alphavantage.note + ')' : '') + ' [' + avCalls.n + ' of ' + CFG.avMaxDay + ' calls used today]', ok: !CFG.avKey ? null : !extraSt.alphavantage.at ? null : extraSt.alphavantage.ok },
   fred: { set: !!CFG.fredKey, status: !CFG.fredKey ? 'no key (optional)' : !extraSt.fred.at ? 'not read yet' : extraSt.fred.ok ? extraSt.fred.n + ' of ' + Object.keys(FRED_IDS).length + ' series' + (extraSt.fred.note ? ' (' + extraSt.fred.note + ')' : '') : 'problem: ' + extraSt.fred.err, ok: !CFG.fredKey ? null : !extraSt.fred.at ? null : extraSt.fred.ok },
 });
 
@@ -1120,5 +1120,5 @@ const server = http.createServer(async (req, res) => {
     send(res, 404, { error: 'not found' });
   } catch (e) { send(res, /Unsupported/.test(e.message) ? 400 : 502, { error: e.message }); }
 });
-if (require.main === module) ready.then(() => server.listen(CFG.port, () => { console.log('Chloe server on ' + CFG.port); ensureWebhook().catch(() => {}); }));
+if (require.main === module) ready.then(() => server.listen(CFG.port, () => { console.log('Chloe server on ' + CFG.port); ensureWebhook().catch(() => {}); refreshCalendar().catch(() => {}); getFred().catch(() => {}); }));
 module.exports = { aplusCheck, paperIdFor, TRACK, enterTrade, closeMy, trackJob, viewMy, cmdProgress, INTEL, runCommand, buildDayReport, sendDayReport, queueValidation, pumpValidation, bestPerPair, monitorChecks, runStorageTest, gateFor, hitLine, analyse, AUTO, MACRO, forecasts, server, CFG, runJobs, getCandles, getNews, state, ready, resolveTrade, recordPaper, paperReport, statsOf };
