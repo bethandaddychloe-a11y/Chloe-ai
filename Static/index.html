@@ -1941,6 +1941,7 @@ function srvStatus(){
     row('Bitcoin source',j.btc_source||'-',true);
     row('Price sources, in order',(j.data_order||['td']).join(', ')+(j.last_sources&&Object.keys(j.last_sources).length?' (used: '+Object.keys(j.last_sources).map(function(k){return k+' '+j.last_sources[k]}).join(', ')+')':''),true);
     row('News feeds working',(j.feeds_ok||0)+' of '+(j.feeds_total||0),(j.feeds_ok||0)>0);
+    var ex=j.extra_sources||{};[['finnhub','Finnhub headlines'],['alphavantage','Alpha Vantage sentiment'],['fred','FRED official numbers']].forEach(function(p){var x=ex[p[0]];if(x)row(p[1],x.status,x.ok===true||x.ok===null&&!x.set)});
     row('Economic calendar',j.calendar&&j.calendar.ok?(j.calendar.n+' high-impact events this week'):('not loaded'+(j.calendar&&j.calendar.err?': '+j.calendar.err:'')),!!(j.calendar&&j.calendar.ok));
     row('Data used today',(j.credits_today||0)+' of about '+(j.credit_limit||800)+' calls',(j.credits_today||0)<(j.credit_limit||800)*0.9);
     row('Daily signal sent at',(j.sod_hour_utc!=null?String(j.sod_hour_utc).padStart(2,'0')+':00 UTC':'-'),true);
@@ -2184,9 +2185,10 @@ function loadForecast(){
   fetch('/api/forecast').then(function(r){return r.json()}).then(renderForecast).catch(function(){});
 }
 function renderForecast(j){
-  var box=$('fcBody');if(!j||!j.events||!j.events.length){return}
+  var box=$('fcBody');if(!j)return;var off=j.official||[];if(!j.events||!j.events.length){if(off.length){$('fcCard').hidden=false;box.textContent='';var o0=el('div','note');o0.style.cssText='margin:0 0 8px';o0.textContent='Latest official numbers (FRED): '+off.join(' ');box.appendChild(o0)}return}
   FCD={};j.events.forEach(function(f){if(f.left>-6*3600000&&!FCD[f.kind])FCD[f.kind]=f});renderScen();
   $('fcCard').hidden=false;box.textContent='';
+  if(off.length){var o1=el('div','note');o1.style.cssText='margin:0 0 8px';o1.textContent='Latest official numbers (FRED): '+off.join(' ');box.appendChild(o1)}
   j.events.forEach(function(f){
     var c=el('div','ev'),h=el('div','ev-head');h.appendChild(el('b',null,f.name));h.appendChild(el('span','note',f.left>0?fmtLeft(f.left):'released'));c.appendChild(h);
     c.appendChild(el('div','note',f.label+': previous '+f.prev+', forecast '+(f.cons==null?'not known yet':f.cons)));
