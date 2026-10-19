@@ -11,6 +11,7 @@ const INTEL = require('./intel.js');
 const CHAT = require('./chat.js');
 const TRACK = require('./track.js');
 const CHART = require('./chartcheck.js');
+const FEEDS = require('./feeds.js');
 
 const ENV = process.env;
 const CFG = {
@@ -24,14 +25,16 @@ const CFG = {
   btcSource: (ENV.BTC_SOURCE || 'binance').toLowerCase(),
   sodHour: +(ENV.SOD_HOUR_UTC || 5),
   stratMode: (ENV.STRATEGY || 'sweep').trim(),
-  watch: (ENV.WATCH || 'XAUUSD:H4').split(',').map(s => s.trim()).filter(Boolean),
-  scalpWatch: (ENV.SCALP_WATCH || 'XAUUSD:M5').split(',').map(s => s.trim()).filter(Boolean),
+  watch: (ENV.WATCH || 'XAUUSD:H4,XAUUSD:H1,GBPUSD:H4,GBPUSD:H1,USDJPY:H4,USDJPY:H1,BTCUSD:H4,BTCUSD:H1,USTEC:H4,USTEC:H1').split(',').map(s => s.trim()).filter(Boolean),
+  scalpWatch: (ENV.SCALP_WATCH || 'XAUUSD:M15,XAUUSD:M5,GBPUSD:M15,GBPUSD:M5,USDJPY:M15,USDJPY:M5,BTCUSD:M15,BTCUSD:M5,USTEC:M15,USTEC:M5').split(',').map(s => s.trim()).filter(Boolean),
   minConf: +(ENV.MIN_CONFIDENCE || 55), scalpMinConf: +(ENV.SCALP_MIN_CONFIDENCE || 50),
   scalpCooldownMin: +(ENV.SCALP_COOLDOWN_MIN || 30), scalpMaxPerDay: +(ENV.SCALP_MAX_PER_DAY || 4),
   balance: +(ENV.BALANCE || 1000), riskPct: +(ENV.RISK_PCT || 1),
   reportHourLocal: +(ENV.REPORT_HOUR_LOCAL || 23), tzOffset: +(ENV.REPORT_TZ_OFFSET == null || ENV.REPORT_TZ_OFFSET === '' ? 3 : ENV.REPORT_TZ_OFFSET), alertCooldownMin: +(ENV.ALERT_COOLDOWN_MIN || 180),
   llmKey: ENV.ANTHROPIC_API_KEY || '', llmModel: ENV.LLM_MODEL || 'claude-haiku-5-5', llmDaily: +(ENV.LLM_DAILY_LIMIT || 20),
   tdPerMin: +(ENV.TD_PER_MIN || 8), creditLimit: +(ENV.TD_DAILY_LIMIT || 800),
+  finnhubKey: ENV.FINNHUB_API_KEY || '', avKey: ENV.ALPHAVANTAGE_API_KEY || '', fredKey: ENV.FRED_API_KEY || '', avMaxDay: +(ENV.AV_MAX_PER_DAY || 12),
+  fastOrder: (ENV.FAST_ORDER || 'yahoo,td').split(',').map(x => x.trim().toLowerCase()).filter(x => x === 'td' || x === 'yahoo'),
   dataOrder: (ENV.DATA_ORDER || 'td,yahoo').split(',').map(x => x.trim().toLowerCase()).filter(x => x === 'td' || x === 'yahoo'),
   calUrl: ENV.CALENDAR_URL || 'https://nfs.faireconomy.media/ff_calendar_thisweek.json',
   feeds: (ENV.NEWS_FEEDS || ['https://www.fxstreet.com/rss/news', 'https://www.forexlive.com/feed/news', 'https://www.investing.com/rss/news_1.rss', 'https://www.investing.com/rss/news_25.rss', 'https://feeds.bbci.co.uk/news/business/rss.xml', 'https://feeds.bbci.co.uk/news/world/rss.xml', 'https://www.aljazeera.com/xml/rss/all.xml', 'https://www.cnbc.com/id/10000664/device/rss/rss.html'].join(',')).split(',').map(s => s.trim()).filter(Boolean),
@@ -127,7 +130,8 @@ async function getCandles(sym, tf, size) {
   const key = sym + '|' + tf + '|' + size, hit = cache.get(key);
   const ttl = (size > 500 ? 6 * 3600 : TTL[tf]) * 1000;
   if (hit && Date.now() - hit.at < ttl) return hit.cs;
-  const order = sym === 'BTCUSD' && CFG.btcSource !== 'td' ? ['binance'].concat(CFG.dataOrder.length ? CFG.dataOrder : ['td']) : (CFG.dataOrder.length ? CFG.dataOrder : ['td']);
+  const base = ['M5', 'M15', 'H1'].includes(tf) && CFG.fastOrder.length ? CFG.fastOrder : (CFG.dataOrder.length ? CFG.dataOrder : ['td']); // fast charts ask Yahoo first so the free Twelve Data credits last the day
+  const order = sym === 'BTCUSD' && CFG.btcSource !== 'td' ? ['binance'].concat(base) : base;
   let err = null;
   for (const src of order) {
     try {
@@ -156,6 +160,68 @@ const W = {
 const KEYS = { XAUUSD: [['gold', 'xau'], 1], BTCUSD: [['bitcoin', 'btc', 'crypto'], 1], USDJPY: [['yen', 'usd/jpy', 'usdjpy', 'boj'], -1], GBPUSD: [['pound', 'sterling', 'gbp/usd', 'gbpusd', 'boe'], 1], USTEC: [['nasdaq', 'tech stocks', 'wall street', 's&p'], 1] };
 const USD_DIR = { XAUUSD: -1, BTCUSD: -1, USDJPY: 1, GBPUSD: -1, USTEC: -1 };
 let newsCache = null, lastTitles = [];
+/* ---------- optional free sources: Finnhub headlines, Alpha Vantage sentiment, FRED official numbers (each needs a free key) ---------- */
+const extraSt = { finnhub: { at: 0 }, alphavantage: { at: 0 }, fred: { at: 0 } };
+const KEYS_SECRET = () => [CFG.finnhubKey, CFG.avKey, CFG.fredKey].filter(Boolean);
+const scrub = m => KEYS_SECRET().reduce((t, k) => t.split(k).join('***'), String(m == null ? '' : m)).slice(0, 140);
+async function jget(url, ms) {
+  const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), ms || 9000);
+  try { const r = await doFetch(url, { signal: ctl.signal, headers: { 'user-agent': 'Mozilla/5.0 ChloeAI' } }); if (!r.ok) throw new Error('HTTP ' + r.status); return await r.json(); } finally { clearTimeout(tm); }
+}
+let avCache = null; const avCalls = { day: '', n: 0 };
+async function extraNews() {
+  const out = { titles: [], sentiment: null };
+  if (CFG.finnhubKey) {
+    try {
+      const rows = await Promise.all(['forex', 'general'].map(c => jget('https://finnhub.io/api/v1/news?category=' + c + '&token=' + encodeURIComponent(CFG.finnhubKey))));
+      const t = [].concat(...rows.map(r => FEEDS.parseFinnhub(r)));
+      out.titles = out.titles.concat(t); extraSt.finnhub = { at: Date.now(), ok: true, n: t.length };
+    } catch (e) { extraSt.finnhub = { at: Date.now(), ok: false, err: scrub(e.message) }; }
+  }
+  if (CFG.avKey) {
+    const day = today();
+    if (avCalls.day !== day) { avCalls.day = day; avCalls.n = 0; }
+    if (avCache && Date.now() - avCache.at < 2 * 3600000) { /* fresh enough, no call spent */ }
+    else if (avCalls.n >= CFG.avMaxDay) extraSt.alphavantage = Object.assign({}, extraSt.alphavantage, { ok: !!avCache, note: 'own daily cap of ' + CFG.avMaxDay + ' calls reached, using the last reading', at: Date.now() });
+    else {
+      avCalls.n++;
+      try { const p = FEEDS.parseAlphaVantage(await jget('https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=' + encodeURIComponent('FOREX:USD,CRYPTO:BTC') + '&limit=50&apikey=' + encodeURIComponent(CFG.avKey), 12000)); avCache = { at: Date.now(), p }; extraSt.alphavantage = { at: Date.now(), ok: true, n: p.titles.length }; }
+      catch (e) { extraSt.alphavantage = { at: Date.now(), ok: !!avCache, err: scrub(e.message), limited: !!e.limited }; if (e.limited) avCache = avCache ? Object.assign(avCache, { at: Date.now() - 3600000 }) : null; }
+    }
+    if (avCache) { out.titles = out.titles.concat(avCache.p.titles); out.sentiment = avCache.p.sentiment; }
+  }
+  return out;
+}
+const sentPts = v => v == null ? 0 : v >= 0.15 ? 2 : v >= 0.05 ? 1 : v <= -0.15 ? -2 : v <= -0.05 ? -1 : 0;
+let fredCache = null;
+const FRED_IDS = { cpi: 'CPIAUCNS', cpiSA: 'CPIAUCSL', core: 'CPILFENS', coreSA: 'CPILFESL', payrolls: 'PAYEMS', unrate: 'UNRATE', fedfunds: 'FEDFUNDS', y10: 'DGS10' };
+async function getFred(force) {
+  if (!CFG.fredKey) return null;
+  if (!force && fredCache && Date.now() - fredCache.at < 3 * 3600000) return fredCache.v;
+  if (!force && extraSt.fred.ok === false && Date.now() - extraSt.fred.at < 15 * 60000) return fredCache ? fredCache.v : null; // after a failure, wait before asking again
+  const keys = Object.keys(FRED_IDS), res = await Promise.allSettled(keys.map(k => jget('https://api.stlouisfed.org/fred/series/observations?series_id=' + FRED_IDS[k] + '&api_key=' + encodeURIComponent(CFG.fredKey) + '&file_type=json&sort_order=desc&limit=16')));
+  const raw = {}; let bad = null;
+  res.forEach((r, i) => { if (r.status === 'fulfilled') raw[keys[i]] = r.value; else bad = bad || r.reason; });
+  try {
+    if (!Object.keys(raw).length) throw bad || new Error('no reply');
+    const v = FEEDS.parseFred(raw); fredCache = { at: Date.now(), v }; extraSt.fred = { at: Date.now(), ok: true, n: Object.keys(raw).length, note: bad ? 'some series failed: ' + scrub(bad.message) : '' }; return v;
+  } catch (e) { extraSt.fred = { at: Date.now(), ok: false, err: scrub(e.message) }; return fredCache ? fredCache.v : null; }
+}
+async function scoreFromFred() {
+  const f = await getFred().catch(() => null); if (!f) return 0; let n = 0;
+  Object.values(state.forecasts).forEach(fc => {
+    if (fc.outcome || fc.cons == null || fc.t > Date.now() - 2 * 3600000) return;
+    const a = FEEDS.actualFor(f, fc.name, fc.t); if (!a || !a.released) return;
+    fc.actual = a.val; fc.outcome = MACRO.outcome(fc, a.val); fc.hit = fc.outcome === fc.pick; fc.auto = 'FRED'; n++;
+  });
+  if (n) await saveState(); return n;
+}
+const extraRows = () => ({
+  finnhub: { set: !!CFG.finnhubKey, status: !CFG.finnhubKey ? 'no key (optional)' : !extraSt.finnhub.at ? 'not read yet' : extraSt.finnhub.ok ? extraSt.finnhub.n + ' headlines' : 'problem: ' + extraSt.finnhub.err, ok: !CFG.finnhubKey ? null : !extraSt.finnhub.at ? null : extraSt.finnhub.ok },
+  alphavantage: { set: !!CFG.avKey, status: !CFG.avKey ? 'no key (optional)' : !extraSt.alphavantage.at ? 'not read yet' : (extraSt.alphavantage.ok ? (extraSt.alphavantage.n != null ? extraSt.alphavantage.n + ' stories scored' : 'using last reading') : 'problem: ' + (extraSt.alphavantage.limited ? 'daily limit reached' : extraSt.alphavantage.err)) + (extraSt.alphavantage.note ? ' (' + extraSt.alphavantage.note + ')' : '') + ' [' + avCalls.n + ' of ' + CFG.avMaxDay + ' calls used today]', ok: !CFG.avKey ? null : !extraSt.alphavantage.at ? null : extraSt.alphavantage.ok },
+  fred: { set: !!CFG.fredKey, status: !CFG.fredKey ? 'no key (optional)' : !extraSt.fred.at ? 'not read yet' : extraSt.fred.ok ? extraSt.fred.n + ' of ' + Object.keys(FRED_IDS).length + ' series' + (extraSt.fred.note ? ' (' + extraSt.fred.note + ')' : '') : 'problem: ' + extraSt.fred.err, ok: !CFG.fredKey ? null : !extraSt.fred.at ? null : extraSt.fred.ok },
+});
+
 const feedStatus = {};
 const count = (t, list) => list.reduce((a, w) => a + (t.includes(w) ? 1 : 0), 0);
 async function getNews() {
@@ -170,7 +236,8 @@ async function getNews() {
       if (m.length > 1) { ok++; titles = titles.concat(m.slice(1, 41)); feedStatus[f] = { ok: true, n: m.length - 1 }; } else feedStatus[f] = { ok: false, err: 'no items' };
     } catch (e) { feedStatus[f] = { ok: false, err: String(e.message).slice(0, 60) }; }
   }));
-  titles = [...new Set(titles)];
+  const ex = await extraNews().catch(() => ({ titles: [], sentiment: null }));
+  titles = [...new Set(titles.concat(ex.titles))];
   const bias = {};
   PAIRS.forEach(sym => {
     let sc = 0;
@@ -178,9 +245,10 @@ async function getNews() {
       sc += (count(t, W.usdUp) - count(t, W.usdDn)) * USD_DIR[sym];
       if (KEYS[sym][0].some(k => t.includes(k))) sc += (count(t, W.up) - count(t, W.dn)) * KEYS[sym][1];
     });
+    if (ex.sentiment) sc += sym === 'XAUUSD' ? sentPts(ex.sentiment.XAU) : sym === 'BTCUSD' ? sentPts(ex.sentiment.BTC) : sentPts(ex.sentiment.USD) * USD_DIR[sym]; // a small nudge from the scored headlines
     bias[sym] = { score: sc, bias: sc >= 3 ? 'bullish' : (sc <= -3 ? 'bearish' : 'neutral') };
   });
-  const v = { bias, headlines: titles.length, feeds_ok: ok, feeds_total: CFG.feeds.length, feeds: Object.assign({}, feedStatus) };
+  const v = { bias, headlines: titles.length, feeds_ok: ok, feeds_total: CFG.feeds.length, feeds: Object.assign({}, feedStatus), sentiment: ex.sentiment ? ex.sentiment.labels : null, extra: extraRows() };
   lastTitles = titles;
   newsCache = { at: Date.now(), v }; return v;
 }
@@ -690,9 +758,10 @@ async function runJobs(mode) {
   res.paper = await resolvePaper();
   if (all || mode === 'track') res.track = await trackJob();
   if (all) {
-    PAIRS.forEach(sym => queueValidation(sym, 'H4')); CFG.scalpWatch.forEach(it => { const [sy, tf] = it.split(':'); queueValidation(sy, (tf || 'M5').toUpperCase()); });
+    PAIRS.forEach(sym => queueValidation(sym, 'H4')); CFG.watch.forEach(it => { const [sy, tf] = it.split(':'); queueValidation(sy, (tf || 'H4').toUpperCase()); }); CFG.scalpWatch.forEach(it => { const [sy, tf] = it.split(':'); queueValidation(sy, (tf || 'M5').toUpperCase()); });
     const lh = new Date(Date.now() + CFG.tzOffset * 3600000).getUTCHours();
     if (lh >= CFG.reportHourLocal) res.report = await sendDayReport(false);
+    res.fred_scored = await scoreFromFred().catch(() => 0);
     res.monitor = await monitorChecks();
   }
   Object.keys(state.sent).forEach(k => { if (Date.now() - state.sent[k] > 3 * 86400000) delete state.sent[k]; });
@@ -919,13 +988,14 @@ let EVCTX = null; try { EVCTX = ENV.EVENT_CTX ? JSON.parse(ENV.EVENT_CTX) : null
 async function forecasts() {
   await getNews().catch(() => {});
   await refreshCalendar().catch(() => {});
-  const now = Date.now(), ctxFor = e => { const k = MACRO.kindOf(e.name), o = {}; if (!k) return EVCTX; o[k] = Object.assign({}, e.forecast != null ? { cons: e.forecast } : {}, e.previous != null ? { prev: e.previous } : {}, (EVCTX && EVCTX[k]) || {}); return Object.assign({}, EVCTX || {}, o); };
+  const fred = await getFred().catch(() => null); await scoreFromFred().catch(() => {});
+  const now = Date.now(), pvOf = e => { const a = FEEDS.actualFor(fred, e.name, e.t); return a ? (a.released ? a.prev : a.val) : null; }, ctxFor = e => { const k = MACRO.kindOf(e.name), o = {}; if (!k) return EVCTX; const pv = e.previous == null ? pvOf(e) : null; o[k] = Object.assign({}, e.forecast != null ? { cons: e.forecast } : {}, e.previous != null ? { prev: e.previous } : (pv != null ? { prev: pv } : {}), (EVCTX && EVCTX[k]) || {}); return Object.assign({}, EVCTX || {}, o); };
   const list = allEvents().filter(e => !e.bo && e.t > now - 6 * 3600000 && e.t < now + 45 * 86400000).sort((a, b) => a.t - b.t).map(e => MACRO.forecast(e, lastTitles, ctxFor(e), now)).filter(Boolean);
   let dirty = false;
   list.forEach(f => { if (f.left > 0 && !state.forecasts[f.id]) { state.forecasts[f.id] = { id: f.id, name: f.name, t: f.t, cons: f.cons, step: f.step, pick: f.pick, above: f.above, inline: f.inline, below: f.below }; dirty = true; } });
   if (dirty) saveState();
   const rec = Object.values(state.forecasts).filter(f => f.outcome), hits = rec.filter(f => f.hit).length;
-  return { events: list, headlines: lastTitles.length, record: { scored: rec.length, hits, items: rec.slice(-8) }, saved: Object.values(state.forecasts).filter(f => !f.outcome && f.t < now).map(f => ({ id: f.id, name: f.name, cons: f.cons })) };
+  return { official: FEEDS.describe(fred, avCache ? avCache.p.sentiment : null), official_status: extraRows().fred.status, events: list, headlines: lastTitles.length, record: { scored: rec.length, hits, items: rec.slice(-8) }, saved: Object.values(state.forecasts).filter(f => !f.outcome && f.t < now).map(f => ({ id: f.id, name: f.name, cons: f.cons })) };
 }
 /* ---------- http ---------- */
 const send = (res, code, obj) => { const b = JSON.stringify(obj); res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(b); };
@@ -938,7 +1008,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/' || p === '/index.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(path.join(STATIC_DIR, 'index.html'))); }
     if (p === '/health') {
       const n = newsCache ? newsCache.v : { feeds_ok: 0, feeds_total: CFG.feeds.length };
-      return send(res, 200, { ok: true, twelve_data_key: !!CFG.tdKey, telegram: !!(CFG.tgToken && CFG.tgChat), metaapi: !!(CFG.maToken && CFG.maAcc), btc_source: lastSource.BTCUSD || CFG.btcSource, credits_today: credits.day === today() ? credits.n : 0, credit_limit: CFG.creditLimit, sod_hour_utc: CFG.sodHour, last_sod: state.sod ? state.sod.date + ': ' + state.sod.txt : null, feeds_ok: n.feeds_ok, feeds_total: n.feeds_total, feeds: n.feeds || {}, data_order: CFG.dataOrder, last_sources: lastSource, source_errors: srcErr, calendar: calStatus, tg_buttons: tgHook, watch: CFG.watch, scalp_watch: CFG.scalpWatch, strategy: CFG.stratMode, storage: UP.url ? 'upstash' : 'temp file (may reset on restart)', storage_error: storeErr, data_age: Object.fromEntries(CFG.watch.concat(CFG.scalpWatch).map(it => { const [sy, tf] = it.split(':'); return [it, ageOf(sy, (tf || 'H4').toUpperCase())]; })), storage_test: storageTest, paused: !!state.paused, uptime_min: Math.round((Date.now() - bootAt) / 60000), loaded_from: loadedFrom, validated: Object.keys(state.valid), last_report: state.lastReport || null, llm: !!CFG.llmKey, paper_open: state.paper.trades.filter(t => t.status !== 'closed').length, paper_closed: state.paper.trades.filter(t => t.status === 'closed').length });
+      return send(res, 200, { ok: true, twelve_data_key: !!CFG.tdKey, telegram: !!(CFG.tgToken && CFG.tgChat), metaapi: !!(CFG.maToken && CFG.maAcc), btc_source: lastSource.BTCUSD || CFG.btcSource, credits_today: credits.day === today() ? credits.n : 0, credit_limit: CFG.creditLimit, sod_hour_utc: CFG.sodHour, last_sod: state.sod ? state.sod.date + ': ' + state.sod.txt : null, feeds_ok: n.feeds_ok, feeds_total: n.feeds_total, feeds: n.feeds || {}, data_order: CFG.dataOrder, fast_order: CFG.fastOrder, extra_sources: extraRows(), last_sources: lastSource, source_errors: srcErr, calendar: calStatus, tg_buttons: tgHook, watch: CFG.watch, scalp_watch: CFG.scalpWatch, strategy: CFG.stratMode, storage: UP.url ? 'upstash' : 'temp file (may reset on restart)', storage_error: storeErr, data_age: Object.fromEntries(CFG.watch.concat(CFG.scalpWatch).map(it => { const [sy, tf] = it.split(':'); return [it, ageOf(sy, (tf || 'H4').toUpperCase())]; })), storage_test: storageTest, paused: !!state.paused, uptime_min: Math.round((Date.now() - bootAt) / 60000), loaded_from: loadedFrom, validated: Object.keys(state.valid), last_report: state.lastReport || null, llm: !!CFG.llmKey, paper_open: state.paper.trades.filter(t => t.status !== 'closed').length, paper_closed: state.paper.trades.filter(t => t.status === 'closed').length });
     }
     if (p === '/api/candles') {
       const sym = (q.get('symbol') || 'XAUUSD').toUpperCase(), tf = (q.get('tf') || 'H4').toUpperCase();
