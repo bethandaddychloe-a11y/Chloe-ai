@@ -169,7 +169,7 @@ async function jget(url, ms) {
   const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), ms || 9000);
   try { const r = await doFetch(url, { signal: ctl.signal, headers: { 'user-agent': 'Mozilla/5.0 ChloeAI' } }); if (!r.ok) throw new Error('HTTP ' + r.status); return await r.json(); } finally { clearTimeout(tm); }
 }
-let avCache = null; const avCalls = { day: '', n: 0 };
+let avCache = null, avOffUntil = 0; const avCalls = { day: '', n: 0 };
 async function extraNews() {
   const out = { titles: [], sentiment: null };
   if (CFG.finnhubKey) {
@@ -182,12 +182,21 @@ async function extraNews() {
   if (CFG.avKey) {
     const day = today();
     if (avCalls.day !== day) { avCalls.day = day; avCalls.n = 0; }
-    if (avCache && Date.now() - avCache.at < 2 * 3600000) { /* fresh enough, no call spent */ }
+    if (avOffUntil > Date.now()) extraSt.alphavantage = { at: Date.now(), ok: false, err: 'Alpha Vantage treats news sentiment as a premium feature for this key, so Chloe stopped asking (it will try once more tomorrow)' };
+    else if (avCache && Date.now() - avCache.at < 2 * 3600000) { /* fresh enough, no call spent */ }
     else if (avCalls.n >= CFG.avMaxDay) extraSt.alphavantage = Object.assign({}, extraSt.alphavantage, { ok: !!avCache, note: 'own daily cap of ' + CFG.avMaxDay + ' calls reached, using the last reading', at: Date.now() });
     else {
-      avCalls.n++;
-      try { const p = FEEDS.parseAlphaVantage(await jget('https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=' + encodeURIComponent('FOREX:USD,CRYPTO:BTC') + '&limit=50&apikey=' + encodeURIComponent(CFG.avKey), 12000)); avCache = { at: Date.now(), p }; extraSt.alphavantage = { at: Date.now(), ok: true, n: p.titles.length }; }
-      catch (e) { extraSt.alphavantage = { at: Date.now(), ok: !!avCache, err: scrub(e.message), limited: !!e.limited }; if (e.limited) avCache = avCache ? Object.assign(avCache, { at: Date.now() - 3600000 }) : null; }
+      const tries = ['tickers=' + encodeURIComponent('FOREX:USD,CRYPTO:BTC') + '&limit=50', 'topics=economy_macro,finance&limit=50']; let lastErr = null, done = false;
+      for (const q of tries) {
+        avCalls.n++;
+        try { const p = FEEDS.parseAlphaVantage(await jget('https://www.alphavantage.co/query?function=NEWS_SENTIMENT&' + q + '&apikey=' + encodeURIComponent(CFG.avKey), 12000)); avCache = { at: Date.now(), p }; extraSt.alphavantage = { at: Date.now(), ok: true, n: p.titles.length }; done = true; break; }
+        catch (e) { lastErr = e; if (!/premium/i.test(e.message)) break; }
+      }
+      if (!done) {
+        extraSt.alphavantage = { at: Date.now(), ok: !!avCache, err: scrub(lastErr && lastErr.message), limited: !!(lastErr && lastErr.limited) };
+        if (lastErr && /premium/i.test(lastErr.message)) avOffUntil = Date.now() + 24 * 3600000;
+        else if (lastErr && lastErr.limited) avCache = avCache ? Object.assign(avCache, { at: Date.now() - 3600000 }) : null;
+      }
     }
     if (avCache) { out.titles = out.titles.concat(avCache.p.titles); out.sentiment = avCache.p.sentiment; }
   }
@@ -255,21 +264,26 @@ async function getNews() {
 }
 
 /* ---------- economic calendar (free Forex Factory weekly JSON; high-impact USD, GBP, JPY) ---------- */
-let calEvents = [], calAt = 0, calFails = 0, calStatus = { ok: false, err: 'not loaded yet' };
+let calEvents = [], calAt = 0, calFails = 0, calBackoffMin = 45, calStatus = { ok: false, err: 'not loaded yet' };
 const calNum = x => { const v = parseFloat(String(x == null ? '' : x).replace(/[%,KkMmBb]/g, '')); return isFinite(v) ? v : null; };
 async function refreshCalendar(force) {
+  if (!calEvents.length && state.cal && Array.isArray(state.cal.events) && state.cal.events.length && Date.now() - state.cal.at < 9 * 86400000) { // after a restart, start from the copy saved last time
+    calEvents = state.cal.events; calAt = state.cal.at; calStatus = { ok: true, n: calEvents.length, at: state.cal.at, saved: true };
+  }
   if (!force && Date.now() - calAt < 6 * 3600000) return;
   calAt = Date.now();
   try {
     const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), 9000);
-    const arr = await (await doFetch(CFG.calUrl, { signal: ctl.signal, headers: { 'user-agent': 'Mozilla/5.0 ChloeAI' } })).json(); clearTimeout(tm);
+    const txt = await (await doFetch(CFG.calUrl, { signal: ctl.signal, headers: { 'user-agent': 'Mozilla/5.0 ChloeAI' } })).text(); clearTimeout(tm);
+    let arr; try { arr = JSON.parse(txt); } catch (e) { throw new Error(/^\s*</.test(txt) ? 'the calendar site sent a web page instead of data (it is probably limiting requests)' : 'unreadable reply'); }
     if (!Array.isArray(arr)) throw new Error('unexpected reply');
     calEvents = arr.filter(x => x && x.impact === 'High' && ['USD', 'GBP', 'JPY'].includes(x.country) && isFinite(Date.parse(x.date))).map(x => {
       const usd = x.country === 'USD', main = usd && (/^CPI y\/y$/i.test(x.title) || /^Non-Farm Employment Change$/i.test(x.title));
       return { name: (usd ? 'US ' : x.country + ' ') + x.title, t: Date.parse(x.date), bo: !main, forecast: calNum(x.forecast), previous: calNum(x.previous) };
     });
-    calStatus = { ok: true, n: calEvents.length, at: Date.now() }; calFails = 0;
-  } catch (e) { calFails++; calAt = Date.now() - 6 * 3600000 + 10 * 60000; calStatus = { ok: false, err: String(e.message).slice(0, 80), at: Date.now() }; }
+    calStatus = { ok: true, n: calEvents.length, at: Date.now() }; calFails = 0; calBackoffMin = 45;
+    state.cal = { at: Date.now(), events: calEvents }; saveState();
+  } catch (e) { calFails++; calAt = Date.now() - 6 * 3600000 + calBackoffMin * 60000; calBackoffMin = Math.min(calBackoffMin * 2, 360); calStatus = { ok: false, err: String(e.message).slice(0, 110), at: Date.now(), using_saved: calEvents.length, retry_in_min: Math.round(calBackoffMin / 2) }; }
 }
 function allEvents() {
   const stat = CFG.events.filter(e => !calEvents.some(c => Math.abs(c.t - e.t) < 3600000 || (!c.bo && MACRO.kindOf(c.name) && MACRO.kindOf(c.name) === MACRO.kindOf(e.name) && Math.abs(c.t - e.t) < 3 * 86400000)));
@@ -473,7 +487,7 @@ async function monitorChecks() {
     else if (errRun[k] === 0 && downNoted[k]) { delete downNoted[k]; state.alerts['prov:' + k] = 0; await telegram('CHLOE WATCH: data source ' + k + ' is working again.'); }
   }
   if (newsCache && newsCache.v.feeds_total && newsCache.v.feeds_ok === 0) await watch('feeds', 'none of the ' + newsCache.v.feeds_total + ' news feeds answered, so headline lean is blank.');
-  if (!calStatus.ok && calFails >= 3) await watch('calendar', 'the economic calendar has failed ' + calFails + ' times (' + (calStatus.err || '') + '). News blackouts fall back to the built-in CPI and NFP dates only.');
+  if (!calStatus.ok && calFails >= 3) await watch('calendar', 'the economic calendar has failed ' + calFails + ' times (' + (calStatus.err || '') + '). ' + (calEvents.length ? 'Chloe is using the last saved copy (' + calEvents.length + ' events) and will retry later.' : 'News blackouts fall back to the built-in CPI and NFP dates only.'));
   if (credits.day === today() && credits.n >= CFG.creditLimit * 0.9) await watch('credits', 'Twelve Data credits are at ' + credits.n + ' of ' + CFG.creditLimit + ' today. Data will fall back to Yahoo.');
   if (UP.url && (storeErr || (storageTest && storageTest.ok === false))) await watch('storage', 'Upstash storage problem: ' + (storeErr || storageTest.note));
   return out;
