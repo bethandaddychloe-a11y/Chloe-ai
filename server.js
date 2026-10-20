@@ -1006,7 +1006,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (p.startsWith('/api') || p === '/run') await ready;
     const ASSET = { '/icon.svg': 'image/svg+xml', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png', '/maskable-512.png': 'image/png', '/apple-touch-icon.png': 'image/png', '/manifest.webmanifest': 'application/manifest+json', '/sw.js': 'application/javascript' };
-    if (ASSET[p]) { const fp = path.join(STATIC_DIR, p.slice(1)); if (!fs.existsSync(fp)) { res.writeHead(404, { 'content-type': 'application/json' }); return res.end('{"error":"file missing on server: ' + p.slice(1) + '"}'); } res.writeHead(200, { 'content-type': ASSET[p], 'cache-control': p === '/sw.js' ? 'no-cache' : 'public, max-age=86400' }); return res.end(fs.readFileSync(fp)); }
+    if (ASSET[p]) { const fp = path.join(STATIC_DIR, p.slice(1)); if (!fs.existsSync(fp)) { res.writeHead(404, { 'content-type': 'application/json' }); return res.end('{"error":"file missing on server: ' + p.slice(1) + '"}'); } res.writeHead(200, { 'content-type': ASSET[p], 'cache-control': p === '/sw.js' || p === '/manifest.webmanifest' || /^\/(icon|maskable|apple)/.test(p) ? 'no-cache' : 'public, max-age=86400' }); return res.end(fs.readFileSync(fp)); }
     if (p === '/' || p === '/index.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(path.join(STATIC_DIR, 'index.html'))); }
     if (p === '/health') {
       const n = newsCache ? newsCache.v : { feeds_ok: 0, feeds_total: CFG.feeds.length };
