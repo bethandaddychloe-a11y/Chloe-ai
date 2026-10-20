@@ -1,4 +1,4 @@
-// Chloe AI service worker: lets Chrome offer "Install app". Always uses the live network.
+// Chloe AI service worker (v2, black and gold): lets Chrome offer "Install app". Always uses the live network.
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', e => {
