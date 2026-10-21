@@ -1956,6 +1956,8 @@ function srvStatus(){
     row('Last daily signal',j.last_sod||'not yet',!!j.last_sod);
     row('Records kept in',j.storage||'-',(j.storage||'').indexOf('upstash')===0);
     row('Paper trades',(j.paper_closed||0)+' closed, '+(j.paper_open||0)+' open',true);
+    row('Trial alerts',j.trial_alerts===false?'off (proven only)':'on',true);
+    if(j.proven_track)row('Proven alerts',j.proven_track,!!(j.ready&&j.ready.done));
     row('News feeds working',(j.feeds_ok||0)+' of '+(j.feeds_total||0),(j.feeds_ok||0)>0);
   }).catch(function(e){box.textContent='Could not reach the server: '+e.message});
 }
