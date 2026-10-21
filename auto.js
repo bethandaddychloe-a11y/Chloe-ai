@@ -7,13 +7,13 @@ const LIVE_PHRASE = 'I ACCEPT THE RISK OF REAL LOSSES';
 const PLANS = {
   steady: { id: 'steady', name: 'Steady', desc: 'Small fixed risk, swing signals only, strict daily stop. The sensible first plan.', risk: 0.5, maxOpen: 2, maxDay: 3, dayLoss: 2, weekLoss: 4, ddStop: 8, tp: 'tp2', kinds: ['swing'], minConf: 60 },
   standard: { id: 'standard', name: 'Standard', desc: 'One percent risk, swings and scalps, moderate limits.', risk: 1, maxOpen: 3, maxDay: 5, dayLoss: 3, weekLoss: 6, ddStop: 12, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55 },
-  scalper: { id: 'scalper', name: 'Scalper', desc: 'Scalps only, half a percent each, nearer target (TP1), more trades a day.', risk: 0.5, maxOpen: 2, maxDay: 6, dayLoss: 2.5, weekLoss: 5, ddStop: 10, tp: 'tp1', kinds: ['scalp'], minConf: 50 },
+  scalper: { id: 'scalper', name: 'Scalper', desc: 'Scalps only (gold, silver, Nasdaq). Risks half a percent of your CURRENT equity per trade, so lot size rises as the account grows and falls after losses. A trailing stop locks in profit once a trade is working.', risk: 0.5, maxOpen: 2, maxDay: 8, dayLoss: 2.5, weekLoss: 5, ddStop: 10, tp: 'tp2', kinds: ['scalp'], minConf: 50 },
   grow: { id: 'grow', name: 'Step-up', desc: 'Starts at 1% and adds 0.25% after each win up to 2%. A loss drops it back to 1%. Raises risk only while winning.', risk: 1, ramp: { step: 0.25, max: 2 }, maxOpen: 3, maxDay: 5, dayLoss: 3, weekLoss: 7, ddStop: 12, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55 },
   target: { id: 'target', name: 'Daily target', desc: 'One percent risk. Stops for the day after gaining 3% or losing 2%, then waits for tomorrow.', risk: 1, maxOpen: 2, maxDay: 4, dayLoss: 2, dayGain: 3, weekLoss: 5, ddStop: 10, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55 },
   goal: { id: 'goal', name: 'Goal plan', desc: 'You set a start, a target and a number of trades. Chloe works out the risk per trade needed to get there and trades it, rolling all profit into the next trade. Demo only.', risk: 10, maxOpen: 1, maxDay: 3, dayLoss: 60, weekLoss: 90, ddStop: 85, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55, demoOnly: true, goal: true },
   custom: { id: 'custom', name: 'Custom', desc: 'Your own numbers.', risk: 0.5, maxOpen: 2, maxDay: 3, dayLoss: 2, weekLoss: 4, ddStop: 8, tp: 'tp2', kinds: ['swing'], minConf: 60 },
 };
-const ALL_PAIRS = ['XAUUSD', 'BTCUSD', 'USDJPY', 'GBPUSD', 'USTEC'];
+const ALL_PAIRS = ['XAUUSD', 'XAGUSD', 'BTCUSD', 'USDJPY', 'GBPUSD', 'USTEC'];
 const num = (x, lo, hi, d) => { x = parseFloat(x); return isFinite(x) ? Math.min(hi, Math.max(lo, x)) : d; };
 
 module.exports = function makeAuto(D) {
@@ -25,8 +25,9 @@ module.exports = function makeAuto(D) {
 
   function init() {
     const a = state.auto = state.auto || {};
-    a.cfg = Object.assign({ enabled: false, mode: 'demo', plan: 'steady', custom: Object.assign({}, PLANS.custom), pairs: ['XAUUSD', 'BTCUSD', 'USDJPY', 'GBPUSD'], goal: { start: 10, target: 2000, trades: 15, tp: 'tp2', stopOnLoss: true, active: false, run: 0, startEq: 0, result: null }, approval: 'ask', scale: { on: true, addAtR: 1, maxAdds: 2, addFrac: 0.5 }, killed: false, killReason: '', closeOnKill: true, liveAckAt: 0 }, a.cfg || {});
+    a.cfg = Object.assign({ enabled: false, mode: 'demo', plan: 'steady', custom: Object.assign({}, PLANS.custom), pairs: ['XAUUSD', 'XAGUSD', 'USTEC'], goal: { start: 10, target: 2000, trades: 15, tp: 'tp2', stopOnLoss: true, active: false, run: 0, startEq: 0, result: null }, approval: 'ask', scale: { on: true, addAtR: 1, maxAdds: 2, addFrac: 0.5 }, killed: false, killReason: '', closeOnKill: true, liveAckAt: 0 }, a.cfg || {});
     a.cfg.goal = Object.assign({ start: 10, target: 2000, trades: 15, tp: 'tp2', stopOnLoss: true, active: false, run: 0, startEq: 0, result: null }, a.cfg.goal || {}); if (a.cfg.plan === 'ladder') a.cfg.plan = 'goal';
+    if (!a.cfg.pairsV) { a.cfg.pairsV = 2; ['XAGUSD', 'USTEC', 'XAUUSD'].forEach(s => { if (!a.cfg.pairs.includes(s)) a.cfg.pairs.push(s); }); } // silver joined the list
     a.cfg.scale = Object.assign({ on: true, addAtR: 1, maxAdds: 2, addFrac: 0.5 }, a.cfg.scale || {}); a.cfg.approval = a.cfg.approval === 'auto' ? 'auto' : 'ask';
     a.trades = a.trades || []; a.seq = a.seq || 0; a.hb = a.hb || null; a.acct = a.acct || { peak: 0, day: null, week: null }; a.haltDay = a.haltDay || null; a.closeAllPending = !!a.closeAllPending;
     return a;
@@ -107,13 +108,14 @@ module.exports = function makeAuto(D) {
     return null;
   }
   function sweep() { const now = Date.now(); for (const t of A().trades) if (t.status === 'pending' && now > t.askUntil) { t.status = 'expired'; t.err = 'no answer in time'; } }
+  const TRL = () => Object.assign({ startR: 0.8, distR: 0.6, lockR: 0.1 }, D.trail || {}); // trailing stop numbers handed to the EA, in units of the original risk
   function offer(sig) { // sig: {kind,sym,tf,dir,conf,strat,plan:{entry,sl,dist,tps:[{p}]}}
     const a = A(), p = planOf(), c = a.cfg; sweep();
     const why = guard(sig); if (why) { a.lastSkip = { at: Date.now(), sym: sig.sym, why }; return { queued: false, why }; }
     const fam = famOf(sig), add = fam.length ? addCheck(sig, fam) : null, isAdd = !!(add && add.parent);
     const ti = { tp1: 0, tp2: 1, tp3: 2 }[p.tp] || 1, tpDist = Math.abs(sig.plan.tps[ti].p - sig.plan.entry), now = Date.now();
     const rrSig = tpDist / sig.plan.dist, base = p.goal ? goalRisk(a.hb.account.equity, rrSig) : effRisk(p), risk = isAdd ? Math.max(0.1, Math.round(base * c.scale.addFrac * 100) / 100) : base, ask = c.approval !== 'auto';
-    const t = { id: ++a.seq, at: now, mode: c.mode, plan: p.id, kind: sig.kind, sym: sig.sym, tf: sig.tf, dir: sig.dir, conf: sig.conf, strat: sig.strat, proven: !!sig.proven, riskPct: risk, slDist: sig.plan.dist, tpDist, tpKey: p.tp, entry: sig.plan.entry, slPrice: sig.plan.sl, tpPrice: sig.plan.tps[ti].p, goalRun: p.goal ? c.goal.run : 0, expireSec: sig.kind === 'scalp' ? 150 : 900, status: ask ? 'pending' : 'queued', askUntil: ask ? now + (sig.kind === 'scalp' ? 180 : 1200) * 1000 : 0, isAdd, parent: isAdd ? add.parent.id : null, dealIds: [] };
+    const t = { id: ++a.seq, at: now, mode: c.mode, plan: p.id, kind: sig.kind, sym: sig.sym, tf: sig.tf, dir: sig.dir, conf: sig.conf, strat: sig.strat, proven: !!sig.proven, riskPct: risk, slDist: sig.plan.dist, tpDist, tpKey: p.tp, entry: sig.plan.entry, slPrice: sig.plan.sl, tpPrice: sig.plan.tps[ti].p, goalRun: p.goal ? c.goal.run : 0, expireSec: sig.kind === 'scalp' ? 150 : 900, trail: sig.kind === 'scalp' ? TRL() : null, status: ask ? 'pending' : 'queued', askUntil: ask ? now + (sig.kind === 'scalp' ? 180 : 1200) * 1000 : 0, isAdd, parent: isAdd ? add.parent.id : null, dealIds: [] };
     a.trades.push(t);
     if (a.trades.length > 500) a.trades = a.trades.filter((x, i) => i >= a.trades.length - 500 || OPEN_ST.includes(x.status));
     if (ask && D.ask) {
@@ -183,7 +185,7 @@ module.exports = function makeAuto(D) {
     if (!c.enabled || c.killed) out.push('HALT|' + (c.killed ? 'kill switch: ' + c.killReason : 'automation off'));
     else if (a.haltDay === day()) out.push('HALT|stopped for today');
     if (a.closeAllPending) out.push('CLOSEALL');
-    if (c.enabled && !c.killed && a.haltDay !== day() && !a.closeAllPending) for (const t of a.trades) if (t.status === 'queued' && now - t.at <= t.expireSec * 1000 && t.mode === c.mode) { t.status = 'sent'; t.sentAt = now; out.push(['OPEN', t.id, t.sym, t.dir, t.slDist, t.tpDist, t.riskPct, t.expireSec, t.isAdd ? 1 : 0, t.entry || 0].join('|')); }
+    if (c.enabled && !c.killed && a.haltDay !== day() && !a.closeAllPending) for (const t of a.trades) if (t.status === 'queued' && now - t.at <= t.expireSec * 1000 && t.mode === c.mode) { t.status = 'sent'; t.sentAt = now; out.push(['OPEN', t.id, t.sym, t.dir, t.slDist, t.tpDist, t.riskPct, t.expireSec, t.isAdd ? 1 : 0, t.entry || 0, t.trail ? t.trail.startR : 0, t.trail ? t.trail.distR : 0, t.trail ? t.trail.lockR : 0].join('|')); }
     if (a.closeAllPending && !(a.hb.positions || []).length) a.closeAllPending = false;
     await saveState();
     for (const m of msgs) telegram(m);

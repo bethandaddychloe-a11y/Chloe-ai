@@ -69,7 +69,7 @@ function forecast(ev, titles, ctxAll, ms) {
   const edge = Math.abs(pct[0] - pct[2]), conf = edge >= 25 ? 'moderate' : (edge >= 10 ? 'low' : 'very low');
   const pick = pct[0] > pct[2] && pct[0] >= pct[1] ? 'above' : (pct[2] > pct[0] && pct[2] >= pct[1] ? 'below' : 'in line');
   const usdUp = pct[0] + Math.round(pct[1] * 0.2), usdDn = pct[2] + Math.round(pct[1] * 0.2), flat = 100 - usdUp - usdDn;
-  const DIR = { XAUUSD: -1, BTCUSD: -1, USDJPY: 1, GBPUSD: -1, USTEC: -1 }, pairs = {};
+  const DIR = { XAUUSD: -1, XAGUSD: -1, BTCUSD: -1, USDJPY: 1, GBPUSD: -1, USTEC: -1 }, pairs = {};
   for (const s of Object.keys(DIR)) pairs[s] = DIR[s] > 0 ? { up: usdUp, down: usdDn, flat } : { up: usdDn, down: usdUp, flat };
   return { id: kind + ':' + new Date(ev.t).toISOString().slice(0, 10), kind, name: ev.name, t: ev.t, label: c.label, prev: c.prev, cons: c.cons, step: c.step, left: ev.t - now, above: pct[0], inline: pct[1], below: pct[2], pick, confidence: conf, lean: Math.round(lean * 100) / 100, basis, drivers: { facts: c.facts, history: c.history, headlines: hs.hits, headlineCount: hs.n, nowcasts: c.nowcasts }, pairs, note: 'A guess from a simple model that has not been tested on past releases. Keep the odds near 25/50/25 in your head. Spreads widen at the release; the first move often reverses.' };
 }

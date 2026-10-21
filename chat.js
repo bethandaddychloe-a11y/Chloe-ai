@@ -2,8 +2,8 @@
 /* chat.js: turns a message ("/signal gold", "why did it lose", "what if cpi comes in hot") into a command.
    Keyword matching only, so it costs nothing and never guesses wildly. The server runs the command. */
 
-const SYMS = [[/\b(xauusd|xau|gold)\b/i, 'XAUUSD'], [/\b(btcusd|btc|bitcoin)\b/i, 'BTCUSD'], [/\b(usdjpy|yen|jpy)\b/i, 'USDJPY'], [/\b(gbpusd|gbp|pound|cable|sterling)\b/i, 'GBPUSD'], [/\b(ustec|nas100|nasdaq|nq)\b/i, 'USTEC']];
-const COMMANDS = ['help', 'start', 'status', 'signal', 'why', 'pause', 'resume', 'risk', 'news', 'paper', 'learn', 'validate', 'best', 'report', 'whatif', 'ask', 'progress', 'entered', 'closed', 'added', 'aplus', 'chart'];
+const SYMS = [[/\b(xauusd|xau|gold)\b/i, 'XAUUSD'], [/\b(xagusd|xag|silver)\b/i, 'XAGUSD'], [/\b(btcusd|btc|bitcoin)\b/i, 'BTCUSD'], [/\b(usdjpy|yen|jpy)\b/i, 'USDJPY'], [/\b(gbpusd|gbp|pound|cable|sterling)\b/i, 'GBPUSD'], [/\b(ustec|nas100|nasdaq|nq)\b/i, 'USTEC']];
+const COMMANDS = ['help', 'start', 'status', 'signal', 'why', 'pause', 'resume', 'risk', 'news', 'paper', 'learn', 'validate', 'best', 'report', 'whatif', 'ask', 'progress', 'entered', 'closed', 'added', 'aplus', 'chart', 'trial'];
 const NL = [
   ['chart', /\b(chart check|check (the |my |this )?chart|analy[sz]e (the |my |this )?chart|read (the |my |this )?chart)\b/],
   ['whatif', /what\s*if|scenario|suppose|if (cpi|nfp|inflation|payrolls)/],
@@ -12,6 +12,7 @@ const NL = [
   ['best', /(best|which|what|top) (strateg|setup type)|works? (best|better)|strategy (for|on)/],
   ['progress', /\b(progress|my trades?|open trades?|how('s| is) (my|the) trade)\b/],
   ['aplus', /\ba\+|\ba plus\b/],
+  ['trial', /\b(trial alerts?|trial mode|are you ready|ready yet)\b/],
   ['report', /\b(report|summary|recap|end of day)\b|how (did|was|were) (we|you|it|the day|today)|today/],
   ['learn', /\b(learn|learning|mistake|lesson|improve)/],
   ['validate', /\b(validate|validation|proven|prove|backtest|out of sample)\b/],
@@ -46,6 +47,7 @@ const HELP = [
   '/entered gold 2345.6  tell Chloe you took the latest gold signal at your price',
   '/closed gold 2350  log that you closed it  (/added gold 2352 logs a scale-in)',
   '/aplus on  only alert the strictest setups (/aplus off to go back)',
+  '/trial  are the proven alerts ready yet? (/trial off stops the practice alerts once Chloe says READY)',
   '/paper  the paper-trading record',
   '/learn  what Chloe noticed in her mistakes (approve or reject with /learn approve 1)',
   '/news  next big events and the CPI/NFP odds',
