@@ -25,8 +25,8 @@ const CFG = {
   btcSource: (ENV.BTC_SOURCE || 'td').toLowerCase(),
   sodHour: +(ENV.SOD_HOUR_UTC || 5),
   stratMode: (ENV.STRATEGY || 'sweep').trim(),
-  watch: (ENV.WATCH == null ? '' : ENV.WATCH).split(',').map(s => s.trim()).filter(Boolean),
-  scalpWatch: (ENV.SCALP_WATCH || 'XAUUSD:M5,XAGUSD:M5,USTEC:M5,XAUUSD:M1,XAGUSD:M1,USTEC:M1').split(',').map(s => s.trim()).filter(Boolean),
+  watch: (ENV.WATCH == null ? 'XAUUSD:H4,XAUUSD:H1,XAGUSD:H4,USTEC:H4,USDJPY:H4,GBPUSD:H4,BTCUSD:H4' : ENV.WATCH).split(',').map(s => s.trim()).filter(Boolean),
+  scalpWatch: (ENV.SCALP_WATCH || 'XAUUSD:M5,XAGUSD:M5,USTEC:M5,USDJPY:M5,GBPUSD:M5,BTCUSD:M5,XAUUSD:M1,XAGUSD:M1,USTEC:M1').split(',').map(s => s.trim()).filter(Boolean),
   minConf: +(ENV.MIN_CONFIDENCE || 55), scalpMinConf: +(ENV.SCALP_MIN_CONFIDENCE || 50),
   scalpCooldownMin: +(ENV.SCALP_COOLDOWN_MIN || 30), scalpMaxPerDay: +(ENV.SCALP_MAX_PER_DAY || 4),
   balance: +(ENV.BALANCE || 1000), riskPct: +(ENV.RISK_PCT || 1),
@@ -34,6 +34,7 @@ const CFG = {
   llmKey: ENV.ANTHROPIC_API_KEY || '', llmModel: ENV.LLM_MODEL || 'claude-haiku-5-5', llmDaily: +(ENV.LLM_DAILY_LIMIT || 20),
   tdPerMin: +(ENV.TD_PER_MIN || 8), creditLimit: +(ENV.TD_DAILY_LIMIT || 800),
   finnhubKey: ENV.FINNHUB_API_KEY || '', avKey: ENV.ALPHAVANTAGE_API_KEY || '', fredKey: ENV.FRED_API_KEY || '', avMaxDay: +(ENV.AV_MAX_PER_DAY || 12),
+  tdBudget: +(ENV.TD_BUDGET || 780), tdReserve: +(ENV.TD_RESERVE || 220), // hard stop on Twelve Data calls per day; the last part is kept for 5 and 1 minute scalp scans
   tdOnly: (ENV.TD_ONLY == null ? 'XAUUSD,XAGUSD,USTEC' : ENV.TD_ONLY).split(',').map(x => x.trim().toUpperCase()).filter(Boolean),
   fastOrder: (ENV.FAST_ORDER || 'yahoo,td').split(',').map(x => x.trim().toLowerCase()).filter(x => x === 'td' || x === 'yahoo'),
   dataOrder: (ENV.DATA_ORDER || 'td,yahoo').split(',').map(x => x.trim().toLowerCase()).filter(x => x === 'td' || x === 'yahoo'),
@@ -41,7 +42,7 @@ const CFG = {
   feeds: (ENV.NEWS_FEEDS || ['https://www.fxstreet.com/rss/news', 'https://www.forexlive.com/feed/news', 'https://www.investing.com/rss/news_1.rss', 'https://www.investing.com/rss/news_25.rss', 'https://feeds.bbci.co.uk/news/business/rss.xml', 'https://feeds.bbci.co.uk/news/world/rss.xml', 'https://www.aljazeera.com/xml/rss/all.xml', 'https://www.cnbc.com/id/10000664/device/rss/rss.html'].join(',')).split(',').map(s => s.trim()).filter(Boolean),
   events: (ENV.EVENTS || 'US CPI|2026-10-14T12:30:00Z,US NFP|2026-11-06T13:30:00Z').split(',').map(s => { const p = s.split('|'); return { name: p[0], t: Date.parse(p[1]) }; }).filter(e => isFinite(e.t)),
 };
-const PAIRS = (ENV.PAIRS || 'XAUUSD,XAGUSD,USTEC').split(',').map(x => x.trim().toUpperCase()).filter(x => /^[A-Z]{6}$|^USTEC$/.test(x)); // the scalp focus: gold, silver, Nasdaq
+const PAIRS = (ENV.PAIRS || 'XAUUSD,XAGUSD,USTEC,USDJPY,GBPUSD,BTCUSD').split(',').map(x => x.trim().toUpperCase()).filter(x => /^[A-Z]{6}$|^USTEC$/.test(x)); // the scalp focus: gold, silver, Nasdaq
 const SCALP = { trailStartR: +(ENV.TRAIL_START_R || 0.8), trailDistR: +(ENV.TRAIL_DIST_R || 0.6), lockR: +(ENV.TRAIL_LOCK_R || 0.1), maxM1Age: 3 };
 const INSTR = {
   XAUUSD: { dec: 2, pip: 0.1, pv: () => 10 }, BTCUSD: { dec: 2, pip: 1, pv: () => 1 },
@@ -67,6 +68,7 @@ async function loadState() {
   if (UP.url && UP.token) { try { const v = await upstash(['GET', 'chloe_state']); if (v) { Object.assign(state, JSON.parse(v)); loadedFrom = 'Upstash'; } } catch (e) { storeErr = e.message; } }
   state.paper = state.paper || { trades: [], keys: {}, seq: 0 };
   state.forecasts = state.forecasts || {};
+  if (state.cred && state.cred.day === today()) { credits.day = state.cred.day; credits.n = Math.max(credits.n, +state.cred.n || 0); }
   state.alerts = state.alerts || {}; state.counts = state.counts || {}; state.valid = state.valid || {}; state.rules = state.rules || {}; state.paused = !!state.paused; state.aplus = !!state.aplus; state.trial = state.trial !== false; state.ready = state.ready || {}; state.my = state.my || { seq: 0, list: [] }; state.llmUse = state.llmUse || {};
   AUTO.init();
 }
@@ -93,12 +95,18 @@ const stamp = ms => new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
 async function tdCandles(sym, tf, size) {
   if (!CFG.tdKey) throw new Error('TWELVE_DATA_API_KEY is not set on the server');
   const code = sym === 'USTEC' ? 'QQQ' : sym.slice(0, 3) + '/' + sym.slice(3), k = sym === 'USTEC' ? CFG.ndx : 1;
-  await tdGate();
   if (credits.day !== today()) { credits.day = today(); credits.n = 0; }
-  credits.n++;
+  const prio = (tf === 'M5' || tf === 'M1') && size <= 500;
+  if (credits.n >= CFG.tdBudget || (!prio && credits.n >= CFG.tdBudget - CFG.tdReserve)) throw new Error('Twelve Data budget for today is used (' + credits.n + ' of ' + CFG.tdBudget + '), so saved or Yahoo prices are used until tomorrow');
+  await tdGate();
   const u = 'https://api.twelvedata.com/time_series?symbol=' + encodeURIComponent(code) + '&interval=' + TF_TD[tf] + '&outputsize=' + size + '&timezone=UTC&apikey=' + CFG.tdKey;
   const j = await (await doFetch(u)).json();
-  if (j.status === 'error' || !j.values) throw new Error(j.message || 'Twelve Data returned no candles');
+  if (j.status === 'error' || !j.values) {
+    const msg = String(j.message || 'Twelve Data returned no candles');
+    if (/run out|api credits|daily limit|per day|exceeded/i.test(msg) && !/per minute|minute/i.test(msg)) { credits.n = Math.max(credits.n, CFG.tdBudget); credits.hit = today(); saveState(); } // Twelve Data says today's credits are gone: stop asking until 00:00 UTC
+    throw new Error(msg);
+  }
+  credits.n++; state.cred = { day: credits.day, n: credits.n }; // only real answers are counted, and the count survives restarts
   return j.values.slice().reverse().map(v => ({ t: v.datetime, o: +v.open * k, h: +v.high * k, l: +v.low * k, c: +v.close * k }));
 }
 async function binanceCandles(tf, size) {
@@ -140,6 +148,7 @@ async function getCandles(sym, tf, size, force) {
   const key = sym + '|' + tf + '|' + size, hit = cache.get(key);
   const ttl = (size > 500 ? 6 * 3600 : TTL[tf]) * 1000;
   if (hit && Date.now() - hit.at < (force ? Math.min(ttl, 20000) : ttl)) return hit.cs;
+  if (hit && sym !== 'BTCUSD' && INTEL.marketClosed(sym, Date.now()) && Date.now() - hit.at > 0 && hit.cs.length && INTEL.marketClosed(sym, hit.at + 60000)) return hit.cs; // market shut and the saved candles were fetched after it shut: nothing new can arrive, so spend no credit
   const base = CFG.tdOnly.includes(sym) ? ['td'] : ['M5', 'M15', 'H1'].includes(tf) && CFG.fastOrder.length ? CFG.fastOrder : (CFG.dataOrder.length ? CFG.dataOrder : ['td']); // gold and Nasdaq stay on Twelve Data: Yahoo has no matching gold price and its Nasdaq is a futures price // fast charts ask Yahoo first so the free Twelve Data credits last the day
   const order = sym === 'BTCUSD' && CFG.btcSource !== 'td' ? ['binance'].concat(base) : base;
   let err = null;
@@ -237,7 +246,7 @@ async function scoreFromFred() {
 }
 const extraRows = () => ({
   finnhub: { set: !!CFG.finnhubKey, status: !CFG.finnhubKey ? 'no key (optional)' : !extraSt.finnhub.at ? 'not read yet' : extraSt.finnhub.ok ? extraSt.finnhub.n + ' headlines' : 'problem: ' + extraSt.finnhub.err, ok: !CFG.finnhubKey ? null : !extraSt.finnhub.at ? null : extraSt.finnhub.ok },
-  alphavantage: { set: !!CFG.avKey, status: !CFG.avKey ? 'no key (optional)' : !extraSt.alphavantage.at ? 'not read yet' : (extraSt.alphavantage.ok ? (extraSt.alphavantage.n != null ? extraSt.alphavantage.n + ' stories scored' : 'using last reading') : 'problem, Alpha Vantage says: ' + (extraSt.alphavantage.err || 'no reason given')) + (extraSt.alphavantage.note ? ' (' + extraSt.alphavantage.note + ')' : '') + ' [' + avCalls.n + ' of ' + CFG.avMaxDay + ' calls used today]', ok: !CFG.avKey ? null : !extraSt.alphavantage.at ? null : extraSt.alphavantage.ok },
+  alphavantage: { set: !!CFG.avKey, status: !CFG.avKey ? 'no key (optional)' : !extraSt.alphavantage.at ? 'not read yet' : (extraSt.alphavantage.ok ? (extraSt.alphavantage.n != null ? extraSt.alphavantage.n + ' stories scored' : 'using last reading') : /premium/i.test(extraSt.alphavantage.err || '') ? 'off (this free key cannot read sentiment, not needed)' : 'problem, Alpha Vantage says: ' + (extraSt.alphavantage.err || 'no reason given')) + (extraSt.alphavantage.note ? ' (' + extraSt.alphavantage.note + ')' : '') + ' [' + avCalls.n + ' of ' + CFG.avMaxDay + ' calls used today]', ok: !CFG.avKey ? null : !extraSt.alphavantage.at ? null : (!extraSt.alphavantage.ok && /premium/i.test(extraSt.alphavantage.err || '')) ? null : extraSt.alphavantage.ok },
   fred: { set: !!CFG.fredKey, status: !CFG.fredKey ? 'no key (optional)' : !extraSt.fred.at ? 'not read yet' : extraSt.fred.ok ? extraSt.fred.n + ' of ' + Object.keys(FRED_IDS).length + ' series' + (extraSt.fred.note ? ' (' + extraSt.fred.note + ')' : '') : 'problem: ' + extraSt.fred.err, ok: !CFG.fredKey ? null : !extraSt.fred.at ? null : extraSt.fred.ok },
 });
 
@@ -316,7 +325,7 @@ async function analyse(sym, tf, mode) {
 const usOpen = (ms = Date.now()) => { const d = new Date(ms), w = d.getUTCDay(), m = d.getUTCHours() * 60 + d.getUTCMinutes(); return w >= 1 && w <= 5 && m >= 14 * 60 + 30 && m <= 19 * 60 + 30; }; // Nasdaq proxy trades in US hours, so a stale reading outside them is expected and not worth an alert
 const num = (x, d) => Number(x).toFixed(d);
 function planLines(sym, p, d) {
-  return ['Entry ' + num(p.entry, d) + '   SL ' + num(p.sl, d) + ' (' + num(p.dist / INSTR[sym].pip, 1) + ' pips)', 'TP1 ' + num(p.tps[0].p, d) + '  TP2 ' + num(p.tps[1].p, d) + '  TP3 ' + num(p.tps[2].p, d), 'Lots ' + lots(sym, p.entry, p.dist).toFixed(2) + ' (risk ' + CFG.riskPct + '% of ' + CFG.balance + ')'];
+  return ['Entry ' + num(p.entry, d) + '   SL ' + num(p.sl, d) + ' (' + num(p.dist / INSTR[sym].pip, 1) + ' pips)', p.tps[0].p === p.tps[2].p ? 'Target ' + num(p.tps[0].p, d) + ' (middle of the 4 hour range)' : 'TP1 ' + num(p.tps[0].p, d) + '  TP2 ' + num(p.tps[1].p, d) + '  TP3 ' + num(p.tps[2].p, d), 'Lots ' + lots(sym, p.entry, p.dist).toFixed(2) + ' (risk ' + CFG.riskPct + '% of ' + CFG.balance + ')'];
 }
 const whyOf = checks => 'Why: ' + checks.filter(c => c[1]).map(c => c[0]).join('; ');
 const DISCLAIMER = 'Check the news before you act. This is not financial advice. Demo first.';
@@ -382,7 +391,7 @@ function recordPaper(kind, sym, tf, sg, sigT, conf, strat, tags) {
   const P = state.paper, key = [sym, tf, sg.dir, strat, sigT].join('|');
   if (P.keys[key]) return false;
   P.keys[key] = Date.now();
-  P.trades.push({ id: ++P.seq, kind, sym, tf, dir: sg.dir, strat, conf, sigT, at: Date.now(), plan: { sl: sg.plan.sl, tps: sg.plan.tps.map(t => t.p), ref: sg.plan.entry }, status: 'open', fill: null, doneT: null, bars: 0, res: { tp1: null, tp2: null, tp3: null, trail: kind === 'scalp' ? null : undefined }, cost: PAPER_COST[kind], tags: tags || null, mae: null, mfe: null, trail: kind === 'scalp' ? { startR: SCALP.trailStartR, distR: SCALP.trailDistR, lockR: SCALP.lockR, sl: null } : null });
+  P.trades.push({ id: ++P.seq, kind, sym, tf, dir: sg.dir, strat, conf, sigT, at: Date.now(), plan: { sl: sg.plan.sl, tps: sg.plan.tps.map(t => t.p), ref: sg.plan.entry }, status: 'open', fill: null, doneT: null, bars: 0, res: { tp1: null, tp2: null, tp3: null, trail: kind === 'scalp' && !NOTRAIL.includes(strat) ? null : undefined }, cost: PAPER_COST[kind], tags: tags || null, mae: null, mfe: null, trail: kind === 'scalp' && !NOTRAIL.includes(strat) ? { startR: SCALP.trailStartR, distR: SCALP.trailDistR, lockR: SCALP.lockR, sl: null } : null });
   return P.seq;
 }
 /* cs must hold closed candles only, oldest first. Mutates and returns the trade. */
@@ -663,16 +672,21 @@ function liveStats(sym, tf, strat) {
   const st = INTEL.stats(cl.map(t => t.res.tp2)), span = cl.length ? (Date.now() - cl[0].at) / 86400000 : 0, last = cl.slice(-15).reduce((a, t) => a + t.res.tp2, 0);
   return { st, span, last, ok: st.n >= LIVE_PASS.n && span >= LIVE_PASS.days && st.pf >= LIVE_PASS.pf && st.avgR >= LIVE_PASS.avgR && last > 0 };
 }
+const SEEDS = [ // proven offline on two years of 5 minute and 4 hour gold data (2025 learn, 2026 judge), costs included
+  { sym: 'XAUUSD', tf: 'M5', strat: 'CRT (range sweep)', note: 'CRT on gold 5 minute: 2025 +0.18R (121 trades), 2026 +0.16R (105 trades)' },
+  { sym: 'XAUUSD', tf: 'H4', strat: 'EMA pullback', note: 'EMA pullback on gold 4 hour: 2025 +0.31R (33 trades), 2026 +0.24R (28 trades)' }];
+const NOTRAIL = ['CRT (range sweep)']; // its target is the middle of the 4 hour range, a trailing stop would cut it short
 function tierOf(sym, tf, strat) {
+  if (SEEDS.some(x => x.sym === sym && x.tf === tf && x.strat === strat)) return { proven: true, via: 'backtest' };
   if (provenFor(sym, tf, strat)) return { proven: true, via: 'history' };
   const l = liveStats(sym, tf, strat); if (l.ok) return { proven: true, via: 'live' };
   return { proven: false, via: null };
 }
-const tierHead = (tier, word) => tier.proven ? 'CHLOE AI: PROVEN ' + word : 'CHLOE AI: TRIAL ' + word + ' (not proven yet, demo only)';
-const tierLine = tier => tier.proven ? 'Proof: ' + (tier.via === 'history' ? 'this strategy held up on the part of the price history it was not tuned on.' : 'this strategy has a good live paper record on this pair.') : 'Proof: none yet for this strategy on this pair. Treat it as practice.';
+const tierHead = (tier, word) => tier.proven ? 'CHLOE AI: PROVEN' + (tier.via === 'backtest' ? ' (2 years of tests)' : '') + ' ' + word : 'CHLOE AI: TRIAL ' + word + ' (not proven yet, demo only)';
+const tierLine = tier => tier.proven ? 'Proof: ' + (tier.via === 'backtest' ? 'profitable in both 2025 and 2026 gold prices after costs (thin edge, small sample, keep risk small).' : tier.via === 'history' ? 'this strategy held up on the part of the price history it was not tuned on.' : 'this strategy has a good live paper record on this pair.') : 'Proof: none yet for this strategy on this pair. Treat it as practice.';
 const quietWhy = ap => state.trial === false && ap.ok ? 'trial alerts are off' : (ap.miss[0] || 'trial alerts are off');
 function provenCombos() {
-  const out = [];
+  const out = SEEDS.map(x => x.sym + ' ' + x.tf + ' ' + x.strat + ' (backtest)');
   Object.keys(state.valid).forEach(k => { const v = state.valid[k]; (v.rows || []).forEach(r => { if (r.label === 'proven') out.push(v.sym + ' ' + v.tf + ' ' + nameOf(r.id) + ' (history)'); }); });
   const seen = {}; state.paper.trades.forEach(t => { const k = t.sym + '|' + t.tf + '|' + t.strat; if (seen[k]) return; seen[k] = 1; if (liveStats(t.sym, t.tf, t.strat).ok) out.push(t.sym + ' ' + t.tf + ' ' + t.strat + ' (live)'); });
   return out;
@@ -767,7 +781,7 @@ async function swingAlerts() {
         const key = [sym, tf, sg.dir, sg.strat, cs[cs.length - 1].t].join('|');
         const tg2 = Object.assign({}, tags, { htf: INTEL.ctxTags({ dir: sg.dir, htf: sg.htf, ms: Date.now() }).htf }), ap = aplusCheck(sym, tf, sg.stratName, tg2, sg.conf), tier = tierOf(sym, tf, sg.stratName), quiet = !tier.proven && ((state.aplus && !ap.ok) || state.trial === false);
         tg2.aplus = ap.ok; tg2.proven = tier.proven;
-        if (recordPaper('swing', sym, tf, sg, cs[cs.length - 1].t, sg.conf, sg.stratName, tg2)) { queueValidation(sym, tf); if (!quiet) AUTO.offer({ kind: 'swing', sym, tf, dir: sg.dir, conf: sg.conf, strat: sg.stratName, plan: sg.plan, stale: null, proven: provenFor(sym, tf, sg.stratName) }); }
+        if (recordPaper('swing', sym, tf, sg, cs[cs.length - 1].t, sg.conf, sg.stratName, tg2)) { queueValidation(sym, tf); if (!quiet) AUTO.offer({ kind: 'swing', sym, tf, dir: sg.dir, conf: sg.conf, strat: sg.stratName, plan: sg.plan, stale: null, proven: tierOf(sym, tf, sg.stratName).proven }); }
         if (quiet) { bump('quiet'); status += ' (recorded only: ' + quietWhy(ap) + ')'; }
         else if (!state.sent[key]) {
           const d = INSTR[sym].dec, pid = paperIdFor(sym, tf, sg.dir, sg.stratName, cs[cs.length - 1].t);
@@ -788,6 +802,7 @@ async function scalpAlerts(items, opt) {
     const [sym, tf0] = item.split(':'), tf = (tf0 || 'M5').toUpperCase(), bnd = Math.floor(Date.now() / (TFMIN[tf] * 60000)) * TFMIN[tf] * 60000;
     if (!E.inSession(sym, Date.now())) { out.push({ sym, tf, result: 'outside session' }); continue; }
     if (opt.dedupe && scanned[item] >= bnd) { out.push({ sym, tf, result: 'already scanned at this candle close' }); continue; }
+    if (sym === 'USTEC' && !usOpen()) { out.push({ sym, tf, result: 'Nasdaq prices only move in US hours (14:30 to 19:30 UTC), skipped to save data credits' }); continue; }
     if (tf === 'M1' && !brokerGet(sym, 'M1', 150)) { out.push({ sym, tf, result: 'waiting for 1 minute prices from your broker (the Expert Advisor sends them)' }); continue; }
     try {
       curDec = INSTR[sym].dec;
@@ -805,7 +820,7 @@ async function scalpAlerts(items, opt) {
         let fresh = false;
         const ap = aplusCheck(sym, tf, a.name, tags, a.conf), tier = tierOf(sym, tf, a.name), quiet = !tier.proven && ((state.aplus && !ap.ok) || state.trial === false); tags.aplus = ap.ok; tags.proven = tier.proven;
         if (!cool && (state.scalpDay[dayKey] || 0) < CFG.scalpMaxPerDay && recordPaper('scalp', sym, tf, { dir: a.dir, plan: a.plan }, cs[cs.length - 1].t, a.conf, a.name, tags)) {
-          fresh = true; bump('found'); queueValidation(sym, tf); if (!quiet) AUTO.offer({ kind: 'scalp', sym, tf, dir: a.dir, conf: a.conf, strat: a.name, plan: a.plan, stale: null, proven: provenFor(sym, tf, a.name) }); state.lastScalp[sym] = Date.now(); state.scalpDay[dayKey] = (state.scalpDay[dayKey] || 0) + 1;
+          fresh = true; bump('found'); queueValidation(sym, tf); if (!quiet) AUTO.offer({ kind: 'scalp', sym, tf, dir: a.dir, conf: a.conf, strat: a.name, plan: a.plan, stale: null, proven: tier.proven, noTrail: NOTRAIL.includes(a.name) }); state.lastScalp[sym] = Date.now(); state.scalpDay[dayKey] = (state.scalpDay[dayKey] || 0) + 1;
         }
         if (fresh && quiet) { bump('quiet'); status += ' (recorded only: ' + quietWhy(ap) + ')'; }
         else if (fresh && !state.sent[key]) {
@@ -1087,7 +1102,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/' || p === '/index.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(path.join(STATIC_DIR, 'index.html'))); }
     if (p === '/health') {
       const n = newsCache ? newsCache.v : { feeds_ok: 0, feeds_total: CFG.feeds.length };
-      return send(res, 200, { ok: true, twelve_data_key: !!CFG.tdKey, telegram: !!(CFG.tgToken && CFG.tgChat), metaapi: !!(CFG.maToken && CFG.maAcc), btc_source: lastSource.BTCUSD || CFG.btcSource, credits_today: credits.day === today() ? credits.n : 0, credit_limit: CFG.creditLimit, sod_hour_utc: CFG.sodHour, last_sod: state.sod ? state.sod.date + ': ' + state.sod.txt : null, feeds_ok: n.feeds_ok, feeds_total: n.feeds_total, feeds: n.feeds || {}, data_order: CFG.dataOrder, fast_order: CFG.fastOrder, trial_alerts: state.trial !== false, proven_track: readiness().line, ready: state.ready, td_only: CFG.tdOnly, extra_sources: extraRows(), last_sources: lastSource, source_errors: srcErr, calendar: calStatus, tg_buttons: tgHook, watch: CFG.watch, scalp_watch: CFG.scalpWatch, strategy: CFG.stratMode, storage: UP.url ? 'upstash' : 'temp file (may reset on restart)', storage_error: storeErr, data_age: Object.fromEntries(CFG.watch.concat(CFG.scalpWatch).map(it => { const [sy, tf] = it.split(':'); return [it, ageOf(sy, (tf || 'H4').toUpperCase())]; })), storage_test: storageTest, paused: !!state.paused, uptime_min: Math.round((Date.now() - bootAt) / 60000), loaded_from: loadedFrom, validated: Object.keys(state.valid), last_report: state.lastReport || null, llm: !!CFG.llmKey, paper_open: state.paper.trades.filter(t => t.status !== 'closed').length, paper_closed: state.paper.trades.filter(t => t.status === 'closed').length });
+      return send(res, 200, { ok: true, twelve_data_key: !!CFG.tdKey, telegram: !!(CFG.tgToken && CFG.tgChat), metaapi: !!(CFG.maToken && CFG.maAcc), btc_source: lastSource.BTCUSD || CFG.btcSource, credits_today: credits.day === today() ? credits.n : 0, credit_budget: CFG.tdBudget, credit_limit: CFG.creditLimit, sod_hour_utc: CFG.sodHour, last_sod: state.sod ? state.sod.date + ': ' + state.sod.txt : null, feeds_ok: n.feeds_ok, feeds_total: n.feeds_total, feeds: n.feeds || {}, data_order: CFG.dataOrder, fast_order: CFG.fastOrder, trial_alerts: state.trial !== false, proven_track: readiness().line, ready: state.ready, td_only: CFG.tdOnly, extra_sources: extraRows(), last_sources: lastSource, source_errors: srcErr, calendar: calStatus, tg_buttons: tgHook, watch: CFG.watch, scalp_watch: CFG.scalpWatch, strategy: CFG.stratMode, storage: UP.url ? 'upstash' : 'temp file (may reset on restart)', storage_error: storeErr, data_age: Object.fromEntries(CFG.watch.concat(CFG.scalpWatch).map(it => { const [sy, tf] = it.split(':'); return [it, ageOf(sy, (tf || 'H4').toUpperCase())]; })), storage_test: storageTest, paused: !!state.paused, uptime_min: Math.round((Date.now() - bootAt) / 60000), loaded_from: loadedFrom, validated: Object.keys(state.valid), last_report: state.lastReport || null, llm: !!CFG.llmKey, paper_open: state.paper.trades.filter(t => t.status !== 'closed').length, paper_closed: state.paper.trades.filter(t => t.status === 'closed').length });
     }
     if (p === '/api/candles') {
       const sym = (q.get('symbol') || 'XAUUSD').toUpperCase(), tf = (q.get('tf') || 'H4').toUpperCase();

@@ -233,7 +233,9 @@ var STRATS=[
   {id:'trend',name:'Trend pullback',blurb:'In a clear trend, buy or sell the 30 to 75 percent pullback once price turns back in trend direction.'},
   {id:'break',name:'Breakout and retest',blurb:'Price closes through a swing level, comes back to retest it, and holds.'},
   {id:'sweep',name:'Liquidity sweep',blurb:'Price spikes through a swing high or low to take stops, closes back inside, and a confirming candle follows.'},
-  {id:'line',name:'Line-chart structure',blurb:'Structure read from closing prices only (line chart): trend in closes plus a fresh break of the last closing swing.'}
+  {id:'line',name:'Line-chart structure',blurb:'Structure read from closing prices only (line chart): trend in closes plus a fresh break of the last closing swing.'},
+  {id:'crt',name:'CRT (range sweep)',blurb:'5 minute entries only. The last 4 hour candle is the range; price sweeps its high or low, closes back inside, a displacement candle follows, and the target is the middle of the range.'},
+  {id:'ema',name:'EMA pullback',blurb:'Swing (1 and 4 hour). 20, 50 and 200 averages stacked in one direction, price dips to the 20 average and closes back out in the trend direction.'}
 ];
 function stratName(id){for(var k=0;k<STRATS.length;k++)if(STRATS[k].id===id)return STRATS[k].name;return id}
 function zonesFor(cs,i,x){
@@ -302,7 +304,80 @@ function evalStrat(id,cs,i,x,dir){
 function wrapPA(d,i){
   return {id:'pa',name:'Price action',dir:d.dir,lean:d.lean,q:d.score/7,checks:d.checks,plan:d.plan,zones:[],score:d.score};
 }
+
+/* ---- CRT and EMA pullback (added after testing on gold 2025 vs 2026) ---- */
+function tsOf(c){if(c._ts==null)c._ts=Date.parse(String(c.t).replace(' ','T')+'Z')/1000;return c._ts}
+var CRT_PER=14400;
+/* CRT (candle range theory), 5 minute entries inside the next 4 hour candle: the previous 4 hour candle is the range; price sweeps its high or low,
+   closes back inside, then a candle closes beyond the signal candle (displacement). Target is the middle of the range. */
+function crtEval(cs,i,tf){
+  if(tf!=='M5'||i<60)return null;
+  var t=tsOf(cs[i]),k2=Math.floor(t/CRT_PER),start=i,j,b,hh=(t%86400)/3600,wd=new Date(t*1000).getUTCDay();
+  if(hh<7||hh>=20||wd<1||wd>5)return null; // tested in the London and New York session only
+  while(start>0&&Math.floor(tsOf(cs[start-1])/CRT_PER)===k2)start--;
+  var p=start-1;if(p<0||Math.floor(tsOf(cs[p])/CRT_PER)!==k2-1)return null;
+  var H=-1e9,L=1e9,n=0,k1=k2-1;
+  while(p>=0&&Math.floor(tsOf(cs[p])/CRT_PER)===k1){if(cs[p].h>H)H=cs[p].h;if(cs[p].l<L)L=cs[p].l;n++;p--}
+  if(n<29)return null;
+  var side=null,ext=0,trig=-1;
+  for(j=start;j<=i;j++){b=cs[j];
+    if(side==null){
+      if(b.h>H&&b.l<L)return null;
+      if(b.h>H){side='S';ext=b.h;if(b.c<H){trig=j;break}}
+      else if(b.l<L){side='B';ext=b.l;if(b.c>L){trig=j;break}}
+    }else if(side==='S'){ext=Math.max(ext,b.h);if(b.c<H){trig=j;break}}
+    else{ext=Math.min(ext,b.l);if(b.c>L){trig=j;break}}
+  }
+  if(trig<0)return null;
+  var sb=cs[trig],f=-1;
+  for(j=trig+1;j<=i;j++){b=cs[j];if(side==='S'?b.c<sb.l:b.c>sb.h){f=j;break}if(side==='S'?b.h>ext:b.l<ext)return null}
+  if(f!==i)return null;
+  if(Math.floor((t+300)/CRT_PER)!==k2)return null;
+  var up=side==='B',sgn=up?1:-1,atr=atrAt(cs,i,14)||(cs[i].h-cs[i].l),sext=ext;
+  for(j=start;j<=i;j++){sext=up?Math.min(sext,cs[j].l):Math.max(sext,cs[j].h)}
+  var en=cs[i].c,sl=sext-sgn*0.1*atr,mid=(H+L)/2,dist=Math.abs(en-sl),rr=(en-sl)*sgn>0&&(mid-en)*sgn>0&&dist>0?Math.abs(mid-en)/dist:0;
+  var conds=[
+    ['4 hour range '+fmt(L)+' to '+fmt(H)+': price swept the '+(up?'low':'high')+' to '+fmt(ext)+' and closed back inside',true],
+    ['Displacement: a candle closed beyond the signal candle, in the '+(up?'buy':'sell')+' direction',true],
+    [rr>=1?'Middle of the range '+fmt(mid)+' is '+rr.toFixed(1)+'R away':'Middle of the range is too close to the stop ('+rr.toFixed(1)+'R, need 1R)',rr>=1],
+    [dist>=0.5*atr?'Stop is a sensible size':'Stop is under half an ATR, too small for the spread',dist>=0.5*atr]];
+  var ok=conds.every(function(k){return k[1]});
+  return {dir:up?'BUY':'SELL',conds:conds,ok:ok,en:en,sl:sl,mid:mid,dist:dist};
+}
+/* EMA pullback (swing): 20, 50 and 200 averages stacked in one direction, price dips to the 20 and closes back out in trend direction. */
+function emaArr(cs){
+  var c=cs._ema;if(c&&c.n===cs.length)return c.a;
+  var a=[],e1=cs[0].c,e2=e1,e3=e1,k1=2/21,k2=2/51,k3=2/201;
+  for(var j=0;j<cs.length;j++){if(j){var v=cs[j].c;e1=v*k1+e1*(1-k1);e2=v*k2+e2*(1-k2);e3=v*k3+e3*(1-k3)}a.push([e1,e2,e3])}
+  try{Object.defineProperty(cs,'_ema',{value:{n:cs.length,a:a},writable:true,configurable:true,enumerable:false})}catch(e){}
+  return a;
+}
+function emaEval(cs,i,tf){
+  if((tf!=='H4'&&tf!=='H1'&&tf!=='D1')||i<210)return null;
+  if(tf==='H1'){var h=new Date(tsOf(cs[i])*1000).getUTCHours();if(h<7||h>=20)return null}
+  var E=emaArr(cs)[i],c=cs[i],up=null;
+  if(E[1]>E[2]&&E[0]>E[1]&&c.l<=E[0]&&c.c>E[0]&&c.c>c.o)up=true;
+  else if(E[1]<E[2]&&E[0]<E[1]&&c.h>=E[0]&&c.c<E[0]&&c.c<c.o)up=false;
+  if(up==null)return null;
+  var sgn=up?1:-1,atr=atrAt(cs,i,14)||(c.h-c.l),lo=Math.min(c.l,cs[i-1].l,cs[i-2].l),hi=Math.max(c.h,cs[i-1].h,cs[i-2].h),sl=up?lo-0.1*atr:hi+0.1*atr,en=c.c,dist=Math.abs(en-sl);
+  var conds=[
+    [(up?'Uptrend':'Downtrend')+': 20, 50 and 200 averages stacked '+(up?'upward':'downward'),true],
+    ['Price dipped to the 20 average ('+fmt(E[0])+') and closed back '+(up?'above':'below')+' it, candle closed '+(up?'up':'down'),true],
+    [dist<=3*atr&&(en-sl)*sgn>0?'Stop is '+(dist/atr).toFixed(1)+' ATR':'Stop would be wider than 3 ATR',dist<=3*atr&&(en-sl)*sgn>0]];
+  return {dir:up?'BUY':'SELL',conds:conds,ok:conds.every(function(k){return k[1]}),en:en,sl:sl,dist:dist};
+}
+function runCustom(id,cs,i,tf){
+  var e=id==='crt'?crtEval(cs,i,tf):emaEval(cs,i,tf),name=stratName(id);
+  if(!e)return {id:id,name:name,dir:'WAIT',lean:'WAIT',q:0,checks:[[id==='crt'?'No sweep of the last 4 hour range with a displacement candle right now (needs the 5 minute chart)':'No pullback to the 20 average inside a clean trend right now (needs the 1 or 4 hour chart)',false]],plan:null,zones:[],score:0};
+  if(!e.ok)return {id:id,name:name,dir:'WAIT',lean:e.dir,q:0.3,checks:e.conds,plan:null,zones:[],score:2};
+  var sgn=e.dir==='BUY'?1:-1,lv=levelsOf(pivots(cs,i),e.en),tps;
+  if(id==='crt')tps=[{p:e.mid,kind:'MID'},{p:e.mid,kind:'MID'},{p:e.mid,kind:'MID'}];
+  else tps=[1.5,2,3].map(function(m){return {p:e.en+sgn*m*e.dist,kind:'R'}});
+  var plan={dir:e.dir,entry:e.en,sl:e.sl,dist:e.dist,tps:tps,nearOpp:(sgn>0?lv.res:lv.sup)[0]!=null?(sgn>0?lv.res:lv.sup)[0]:null,sup:lv.sup[0],res:lv.res[0]};
+  return {id:id,name:name,dir:e.dir,lean:e.dir,q:0.8,checks:e.conds,plan:plan,zones:[],score:6};
+}
 function runStrat(id,cs,i,tf,bias,minScore,x,paBase){
+  if(id==='crt'||id==='ema')return runCustom(id,cs,i,tf);
   x=x||ctxAt(cs,i,tf,bias);
   if(id==='pa'){return wrapPA(paBase||decide(scoreAt(cs,i,bias,tf),minScore,false),i)}
   var best=null;
@@ -387,7 +462,7 @@ function analyseAll(cs,tf,bias,mode,minScore,block,near){
 }
 /* ---- scalping profile: same rules, lower timeframe, tighter stop, fixed small targets, extra filters ---- */
 var SCALP_DEF={tf:'M5',slAtr:1.5,rr:[1,1.5,2.2],target:1,minConfirm:2,minScore:5,session:true,cost:0.1};
-var SCALP_ORDER=['smc','sweep','sr','trend','break','line','pa'];
+var SCALP_ORDER=['crt','smc','sweep','sr','trend','break','line','pa'];
 function inSession(sym,ms){
   if(sym==='BTCUSD')return true;
   var d=new Date(ms||Date.now()),h=d.getUTCHours(),w=d.getUTCDay();
@@ -398,6 +473,7 @@ function scalpPick(cs,i,tf,bias,o,x){
   for(var k=0;k<SCALP_ORDER.length;k++){
     var r=runStrat(SCALP_ORDER[k],cs,i,tf,bias,o.minScore,x);
     if(r.dir==='WAIT'||!r.plan)continue;
+    if(r.id==='crt'){var cfc=indConfirm(cs,i,r.dir);return {ok:true,id:r.id,name:r.name,dir:r.dir,q:r.q,checks:r.checks.concat(cfc.items),plan:r.plan,confirm:cfc,why:'CRT range sweep with displacement, target the middle of the 4 hour range'}}
     var atr=x.atr,dist=r.plan.dist;
     if(dist>o.slAtr*atr){lastFail=r.name+': stop is '+(dist/atr).toFixed(1)+' ATR, wider than the '+o.slAtr+' ATR scalp limit';continue}
     var cf=indConfirm(cs,i,r.dir);
