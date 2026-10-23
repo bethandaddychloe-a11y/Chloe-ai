@@ -28,7 +28,7 @@ const CFG = {
   watch: (ENV.WATCH == null ? 'XAUUSD:H4,XAUUSD:H1,XAGUSD:H4,USTEC:H4,USDJPY:H4,GBPUSD:H4,BTCUSD:H4' : ENV.WATCH).split(',').map(s => s.trim()).filter(Boolean),
   scalpWatch: (ENV.SCALP_WATCH || 'XAUUSD:M5,XAGUSD:M5,USTEC:M5,USDJPY:M5,GBPUSD:M5,BTCUSD:M5,XAUUSD:M1,XAGUSD:M1,USTEC:M1').split(',').map(s => s.trim()).filter(Boolean),
   minConf: +(ENV.MIN_CONFIDENCE || 55), scalpMinConf: +(ENV.SCALP_MIN_CONFIDENCE || 50),
-  scalpCooldownMin: +(ENV.SCALP_COOLDOWN_MIN || 30), scalpMaxPerDay: +(ENV.SCALP_MAX_PER_DAY || 4),
+  scalpCooldownMin: +(ENV.SCALP_COOLDOWN_MIN || 0), scalpMaxPerDay: +(ENV.SCALP_MAX_PER_DAY || 500), // no wait between scalps and no small daily cap: the Scalper plan's own limits decide
   balance: +(ENV.BALANCE || 1000), riskPct: +(ENV.RISK_PCT || 1),
   reportHourLocal: +(ENV.REPORT_HOUR_LOCAL || 23), tzOffset: +(ENV.REPORT_TZ_OFFSET == null || ENV.REPORT_TZ_OFFSET === '' ? 3 : ENV.REPORT_TZ_OFFSET), alertCooldownMin: +(ENV.ALERT_COOLDOWN_MIN || 180),
   llmKey: ENV.ANTHROPIC_API_KEY || '', llmModel: ENV.LLM_MODEL || 'claude-haiku-5-5', llmDaily: +(ENV.LLM_DAILY_LIMIT || 20),
