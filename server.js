@@ -34,6 +34,8 @@ const CFG = {
   llmKey: ENV.ANTHROPIC_API_KEY || '', llmModel: ENV.LLM_MODEL || 'claude-haiku-5-5', llmDaily: +(ENV.LLM_DAILY_LIMIT || 20),
   tdPerMin: +(ENV.TD_PER_MIN || 8), creditLimit: +(ENV.TD_DAILY_LIMIT || 800),
   finnhubKey: ENV.FINNHUB_API_KEY || '', avKey: ENV.ALPHAVANTAGE_API_KEY || '', fredKey: ENV.FRED_API_KEY || '', avMaxDay: +(ENV.AV_MAX_PER_DAY || 12),
+  alertPairs: (ENV.ALERT_PAIRS == null ? 'XAUUSD' : ENV.ALERT_PAIRS).split(',').map(x => x.trim().toUpperCase()).filter(Boolean), alertStrats: (ENV.ALERT_STRATS == null ? 'CRT (range sweep),EMA pullback' : ENV.ALERT_STRATS).split(',').map(x => x.trim()).filter(Boolean), // trial alerts only for these; everything else is recorded quietly until it is proven
+  newsBefore: +(ENV.NEWS_BLACKOUT_BEFORE || 30), newsAfter: +(ENV.NEWS_BLACKOUT_AFTER || 15), dailySignal: ENV.DAILY_SIGNAL === '1',
   tdBudget: +(ENV.TD_BUDGET || 780), tdReserve: +(ENV.TD_RESERVE || 220), // hard stop on Twelve Data calls per day; the last part is kept for 5 and 1 minute scalp scans
   tdOnly: (ENV.TD_ONLY == null ? 'XAUUSD,XAGUSD,USTEC' : ENV.TD_ONLY).split(',').map(x => x.trim().toUpperCase()).filter(Boolean),
   fastOrder: (ENV.FAST_ORDER || 'yahoo,td').split(',').map(x => x.trim().toLowerCase()).filter(x => x === 'td' || x === 'yahoo'),
@@ -144,7 +146,7 @@ async function getCandles(sym, tf, size, force) {
   size = Math.max(70, Math.min(size > 500 ? 5000 : 500, size || 200));
   if (!TF_TD[tf]) throw new Error('Unsupported timeframe');
   if (!/^[A-Z]{6}$|^USTEC$/.test(sym)) throw new Error('Unsupported symbol');
-  { const bc = size <= 500 && brokerGet(sym, tf, tf === 'M1' ? 150 : 700); if (bc) { lastSource[sym] = 'broker'; return bc.slice(-size); } }
+  { const bc = size <= 500 && brokerGet(sym, tf, { M1: 150, M5: 700, M15: 1500, H1: 5400, H4: 21600 }[tf] || 700); if (bc) { lastSource[sym] = 'broker'; return bc.slice(-size); } }
   const key = sym + '|' + tf + '|' + size, hit = cache.get(key);
   const ttl = (size > 500 ? 6 * 3600 : TTL[tf]) * 1000;
   if (hit && Date.now() - hit.at < (force ? Math.min(ttl, 20000) : ttl)) return hit.cs;
@@ -309,6 +311,7 @@ function allEvents() {
 }
 
 /* ---------- analysis helpers ---------- */
+const inBlackout = (ms = Date.now()) => allEvents().some(e => ms >= e.t - CFG.newsBefore * 60000 && ms <= e.t + CFG.newsAfter * 60000);
 const eventNear = (h, ms = Date.now()) => allEvents().some(e => e.t > ms - 3600000 && e.t < ms + h * 3600000);
 function lots(sym, entry, dist) {
   const I = INSTR[sym], risk = CFG.balance * CFG.riskPct / 100, raw = risk / ((dist / I.pip) * I.pv(entry));
@@ -387,11 +390,18 @@ async function handleTg(update) {
 
 /* ---------- paper-trade tracker: records each alerted signal and replays later candles ---------- */
 const PAPER_COST = { swing: 0.05, scalp: 0.1 }, PAPER_BARS = { swing: 30, scalp: 72 }, TPK = ['tp1', 'tp2', 'tp3'];
+state.spread = state.spread || {}; state.slip = state.slip || {};
+/* paper cost in R: once the EA reports your broker's real spread (and fill slippage), scalps are charged that instead of a guess */
+function costFor(kind, sym, dist) {
+  const sp = state.spread && state.spread[sym];
+  if (kind !== 'scalp' || !sp || !(dist > 0)) return PAPER_COST[kind];
+  return Math.min(0.8, Math.max(0.02, Math.round((sp + ((state.slip && state.slip[sym]) || 0)) / dist * 100) / 100));
+}
 function recordPaper(kind, sym, tf, sg, sigT, conf, strat, tags) {
   const P = state.paper, key = [sym, tf, sg.dir, strat, sigT].join('|');
   if (P.keys[key]) return false;
   P.keys[key] = Date.now();
-  P.trades.push({ id: ++P.seq, kind, sym, tf, dir: sg.dir, strat, conf, sigT, at: Date.now(), plan: { sl: sg.plan.sl, tps: sg.plan.tps.map(t => t.p), ref: sg.plan.entry }, status: 'open', fill: null, doneT: null, bars: 0, res: { tp1: null, tp2: null, tp3: null, trail: kind === 'scalp' && !NOTRAIL.includes(strat) ? null : undefined }, cost: PAPER_COST[kind], tags: tags || null, mae: null, mfe: null, trail: kind === 'scalp' && !NOTRAIL.includes(strat) ? { startR: SCALP.trailStartR, distR: SCALP.trailDistR, lockR: SCALP.lockR, sl: null } : null });
+  P.trades.push({ id: ++P.seq, kind, sym, tf, dir: sg.dir, strat, conf, sigT, at: Date.now(), plan: { sl: sg.plan.sl, tps: sg.plan.tps.map(t => t.p), ref: sg.plan.entry }, status: 'open', fill: null, doneT: null, bars: 0, res: { tp1: null, tp2: null, tp3: null, trail: kind === 'scalp' && !NOTRAIL.includes(strat) ? null : undefined }, cost: costFor(kind, sym, Math.abs(sg.plan.entry - sg.plan.sl)), tags: tags || null, mae: null, mfe: null, trail: kind === 'scalp' && !NOTRAIL.includes(strat) ? { startR: SCALP.trailStartR, distR: SCALP.trailDistR, lockR: SCALP.lockR, sl: null } : null });
   return P.seq;
 }
 /* cs must hold closed candles only, oldest first. Mutates and returns the trade. */
@@ -677,14 +687,23 @@ const SEEDS = [ // proven offline on two years of 5 minute and 4 hour gold data 
   { sym: 'XAUUSD', tf: 'H4', strat: 'EMA pullback', note: 'EMA pullback on gold 4 hour: 2025 +0.31R (33 trades), 2026 +0.24R (28 trades)' }];
 const NOTRAIL = ['CRT (range sweep)']; // its target is the middle of the 4 hour range, a trailing stop would cut it short
 function tierOf(sym, tf, strat) {
-  if (SEEDS.some(x => x.sym === sym && x.tf === tf && x.strat === strat)) return { proven: true, via: 'backtest' };
+  if (SEEDS.some(x => x.sym === sym && x.tf === tf && x.strat === strat)) {
+    const l = liveStats(sym, tf, strat), key = sym + '|' + tf + '|' + strat; // the live record can take the backtest badge away
+    if (l.st.n >= 20 && (l.st.pf < 1 || l.st.avgR <= 0)) {
+      state.revoked = state.revoked || {};
+      if (!state.revoked[key]) { state.revoked[key] = Date.now(); telegram('CHLOE: ' + sym + ' ' + tf + ' ' + strat + ' lost its PROVEN badge. Live paper record: ' + l.st.n + ' trades, profit factor ' + l.st.pf.toFixed(2) + ', average ' + INTEL.sgnR(l.st.avgR) + '. It stays on paper until it recovers.'); saveState(); }
+      return { proven: false, via: null };
+    }
+    return { proven: true, via: 'backtest' };
+  }
   if (provenFor(sym, tf, strat)) return { proven: true, via: 'history' };
   const l = liveStats(sym, tf, strat); if (l.ok) return { proven: true, via: 'live' };
   return { proven: false, via: null };
 }
 const tierHead = (tier, word) => tier.proven ? 'CHLOE AI: PROVEN' + (tier.via === 'backtest' ? ' (2 years of tests)' : '') + ' ' + word : 'CHLOE AI: TRIAL ' + word + ' (not proven yet, demo only)';
 const tierLine = tier => tier.proven ? 'Proof: ' + (tier.via === 'backtest' ? 'profitable in both 2025 and 2026 gold prices after costs (thin edge, small sample, keep risk small).' : tier.via === 'history' ? 'this strategy held up on the part of the price history it was not tuned on.' : 'this strategy has a good live paper record on this pair.') : 'Proof: none yet for this strategy on this pair. Treat it as practice.';
-const quietWhy = ap => state.trial === false && ap.ok ? 'trial alerts are off' : (ap.miss[0] || 'trial alerts are off');
+const trialAllowed = (sym, strat) => state.trial !== false && CFG.alertPairs.includes(sym) && CFG.alertStrats.includes(strat);
+const quietWhy = () => state.trial === false ? 'trial alerts are off' : 'not proven yet, so it is only recorded (trial alerts are limited to ' + CFG.alertPairs.join('/') + ' with ' + CFG.alertStrats.join(' and ') + ')';
 function provenCombos() {
   const out = SEEDS.map(x => x.sym + ' ' + x.tf + ' ' + x.strat + ' (backtest)');
   Object.keys(state.valid).forEach(k => { const v = state.valid[k]; (v.rows || []).forEach(r => { if (r.label === 'proven') out.push(v.sym + ' ' + v.tf + ' ' + nameOf(r.id) + ' (history)'); }); });
@@ -757,7 +776,7 @@ async function dailySignal(force) {
   let msg;
   if (act.length) {
     const r = act[0], sg = r.sg, d = INSTR[r.sym].dec;
-    msg = ['CHLOE AI: SIGNAL OF THE DAY', sg.dir + ' ' + r.sym + ' (H4), ' + sg.conf + '% confidence', 'Strategy: ' + sg.stratName, ...planLines(r.sym, sg.plan, d), whyOf(sg.checks), ev.length ? 'Events soon: ' + ev.join(', ') : '', 'Others: ' + ok.filter(x => x !== r).map(x => x.sym + ' ' + x.sg.dir + ' ' + x.sg.conf + '%').join(', '), paperLine(), DISCLAIMER].filter(Boolean).join('\n');
+    msg = ['CHLOE AI: SIGNAL OF THE DAY', sg.dir + ' ' + r.sym + ' (H4), ' + 'setup score ' + sg.conf, 'Strategy: ' + sg.stratName, ...planLines(r.sym, sg.plan, d), whyOf(sg.checks), ev.length ? 'Events soon: ' + ev.join(', ') : '', 'Others: ' + ok.filter(x => x !== r).map(x => x.sym + ' ' + x.sg.dir + ' ' + x.sg.conf + '%').join(', '), paperLine(), DISCLAIMER].filter(Boolean).join('\n');
   } else {
     msg = ['CHLOE AI: NO TRADE TODAY', 'None of the five pairs passes the filters on H4.', ok.map(x => x.sym + ' lean ' + x.sg.lean + ' ' + x.sg.conf + '%').join(', '), ev.length ? 'Events soon: ' + ev.join(', ') : '', 'Waiting is a position.', paperLine()].filter(Boolean).join('\n');
   }
@@ -770,6 +789,7 @@ async function swingAlerts() {
   const out = [];
   for (const item of CFG.watch) {
     const [sym, tf0] = item.split(':'), tf = (tf0 || 'H4').toUpperCase();
+    if (inBlackout()) { out.push({ sym, tf, result: 'news blackout (' + CFG.newsBefore + ' min before to ' + CFG.newsAfter + ' min after a high-impact release)' }); continue; }
     try {
       const { sg, cs, fr } = await analyse(sym, tf); bump('scans');
       const tags = INTEL.ctxTags({ dir: sg.lean || sg.dir, htf: sg.htf, newsNear: eventNear(2), conf: sg.conf, ms: Date.now() });
@@ -779,13 +799,13 @@ async function swingAlerts() {
         if (block) { out.push({ sym, tf, result: 'blocked: ' + block }); continue; }
         bump('found');
         const key = [sym, tf, sg.dir, sg.strat, cs[cs.length - 1].t].join('|');
-        const tg2 = Object.assign({}, tags, { htf: INTEL.ctxTags({ dir: sg.dir, htf: sg.htf, ms: Date.now() }).htf }), ap = aplusCheck(sym, tf, sg.stratName, tg2, sg.conf), tier = tierOf(sym, tf, sg.stratName), quiet = !tier.proven && ((state.aplus && !ap.ok) || state.trial === false);
+        const tg2 = Object.assign({}, tags, { htf: INTEL.ctxTags({ dir: sg.dir, htf: sg.htf, ms: Date.now() }).htf }), ap = aplusCheck(sym, tf, sg.stratName, tg2, sg.conf), tier = tierOf(sym, tf, sg.stratName), quiet = !tier.proven && !trialAllowed(sym, sg.stratName);
         tg2.aplus = ap.ok; tg2.proven = tier.proven;
         if (recordPaper('swing', sym, tf, sg, cs[cs.length - 1].t, sg.conf, sg.stratName, tg2)) { queueValidation(sym, tf); if (!quiet) AUTO.offer({ kind: 'swing', sym, tf, dir: sg.dir, conf: sg.conf, strat: sg.stratName, plan: sg.plan, stale: null, proven: tierOf(sym, tf, sg.stratName).proven }); }
         if (quiet) { bump('quiet'); status += ' (recorded only: ' + quietWhy(ap) + ')'; }
         else if (!state.sent[key]) {
           const d = INSTR[sym].dec, pid = paperIdFor(sym, tf, sg.dir, sg.stratName, cs[cs.length - 1].t);
-          const ok = await telegramEnter([tierHead(tier, 'TRADE'), sg.dir + ' ' + sym + ' ' + tf + ', ' + sg.conf + '% confidence', 'Strategy: ' + sg.stratName, ...planLines(sym, sg.plan, d), whyOf(sg.checks), hitLine(sym, tf, sg.stratName), tierLine(tier), 'Data: newest closed candle ' + fr.ageMin + ' min old (' + fr.status + ')', apLine(ap), pid ? 'Signal #' + pid + '. If you take it, tap the button below, or use the Progress tab to give your own entry price.' : '', DISCLAIMER].filter(Boolean).join('\n'), pid);
+          const ok = await telegramEnter([tierHead(tier, 'TRADE'), sg.dir + ' ' + sym + ' ' + tf + ', ' + 'setup score ' + sg.conf, 'Strategy: ' + sg.stratName, ...planLines(sym, sg.plan, d), whyOf(sg.checks), hitLine(sym, tf, sg.stratName), tierLine(tier), 'Data: newest closed candle ' + fr.ageMin + ' min old (' + fr.status + ')', apLine(ap), pid ? 'Signal #' + pid + '. If you take it, tap the button below, or use the Progress tab to give your own entry price.' : '', DISCLAIMER].filter(Boolean).join('\n'), pid);
           if (ok) { state.sent[key] = Date.now(); status += ' (alert sent)'; }
         }
       } else if (fr.status === 'stale') { bump('stale'); gateFor(sym, tf, '', tags, fr); status = 'blocked: stale data'; }
@@ -801,6 +821,7 @@ async function scalpAlerts(items, opt) {
   for (const item of items) {
     const [sym, tf0] = item.split(':'), tf = (tf0 || 'M5').toUpperCase(), bnd = Math.floor(Date.now() / (TFMIN[tf] * 60000)) * TFMIN[tf] * 60000;
     if (!E.inSession(sym, Date.now())) { out.push({ sym, tf, result: 'outside session' }); continue; }
+    if (inBlackout()) { out.push({ sym, tf, result: 'news blackout (' + CFG.newsBefore + ' min before to ' + CFG.newsAfter + ' min after a high-impact release)' }); continue; }
     if (opt.dedupe && scanned[item] >= bnd) { out.push({ sym, tf, result: 'already scanned at this candle close' }); continue; }
     if (sym === 'USTEC' && !usOpen()) { out.push({ sym, tf, result: 'Nasdaq prices only move in US hours (14:30 to 19:30 UTC), skipped to save data credits' }); continue; }
     if (tf === 'M1' && !brokerGet(sym, 'M1', 150)) { out.push({ sym, tf, result: 'waiting for 1 minute prices from your broker (the Expert Advisor sends them)' }); continue; }
@@ -818,14 +839,14 @@ async function scalpAlerts(items, opt) {
         const dayKey = sym + '|' + today(), key = ['S', sym, tf, a.dir, cs[cs.length - 1].t].join('|');
         const cool = Date.now() - (state.lastScalp[sym] || 0) < CFG.scalpCooldownMin * 60000;
         let fresh = false;
-        const ap = aplusCheck(sym, tf, a.name, tags, a.conf), tier = tierOf(sym, tf, a.name), quiet = !tier.proven && ((state.aplus && !ap.ok) || state.trial === false); tags.aplus = ap.ok; tags.proven = tier.proven;
+        const ap = aplusCheck(sym, tf, a.name, tags, a.conf), tier = tierOf(sym, tf, a.name), quiet = !tier.proven && !trialAllowed(sym, a.name); tags.aplus = ap.ok; tags.proven = tier.proven;
         if (!cool && (state.scalpDay[dayKey] || 0) < CFG.scalpMaxPerDay && recordPaper('scalp', sym, tf, { dir: a.dir, plan: a.plan }, cs[cs.length - 1].t, a.conf, a.name, tags)) {
           fresh = true; bump('found'); queueValidation(sym, tf); if (!quiet) AUTO.offer({ kind: 'scalp', sym, tf, dir: a.dir, conf: a.conf, strat: a.name, plan: a.plan, stale: null, proven: tier.proven, noTrail: NOTRAIL.includes(a.name) }); state.lastScalp[sym] = Date.now(); state.scalpDay[dayKey] = (state.scalpDay[dayKey] || 0) + 1;
         }
         if (fresh && quiet) { bump('quiet'); status += ' (recorded only: ' + quietWhy(ap) + ')'; }
         else if (fresh && !state.sent[key]) {
           const d = INSTR[sym].dec, pid = paperIdFor(sym, tf, a.dir, a.name, cs[cs.length - 1].t);
-          const ok = await telegramEnter([tierHead(tier, 'SCALP'), a.dir + ' ' + sym + ' ' + tf + ', ' + a.conf + '% confidence', 'Strategy: ' + a.name, ...planLines(sym, a.plan, d), 'History on these candles: ' + a.stats.n + ' trades, ' + (a.stats.n ? Math.round(a.stats.w / a.stats.n * 100) + '% won' : 'none'), hitLine(sym, tf, a.name), tierLine(tier), whyOf(a.checks), apLine(ap), pid ? 'Signal #' + pid + '. If you take it, tap the button below, or use the Progress tab.' : '', 'Scalps are fast and spread matters. ' + DISCLAIMER].filter(Boolean).join('\n'), pid);
+          const ok = await telegramEnter([tierHead(tier, 'SCALP'), a.dir + ' ' + sym + ' ' + tf + ', ' + 'setup score ' + a.conf, 'Strategy: ' + a.name, ...planLines(sym, a.plan, d), 'History on these candles: ' + a.stats.n + ' trades, ' + (a.stats.n ? Math.round(a.stats.w / a.stats.n * 100) + '% won' : 'none'), hitLine(sym, tf, a.name), tierLine(tier), whyOf(a.checks), apLine(ap), pid ? 'Signal #' + pid + '. If you take it, tap the button below, or use the Progress tab.' : '', 'Scalps are fast and spread matters. ' + DISCLAIMER].filter(Boolean).join('\n'), pid);
           if (ok) { state.sent[key] = Date.now(); status += ' (alert sent)'; }
         }
       }
@@ -843,8 +864,14 @@ async function runJobs(mode) {
   if (mode === 'report') { res.report = await sendDayReport(true); return res; }
   if (mode === 'validate') { PAIRS.forEach(sym => queueValidation(sym, 'H4', true)); res.queued = vq.slice(); return res; }
   const all = !mode || mode === 'all';
+  if (all) { // the bot on the VPS went quiet while automation is on
+    try {
+      const st = AUTO.status();
+      if (st.cfg && st.cfg.enabled && !st.cfg.killed && st.lastSeenSec != null && st.lastSeenSec > 420 && !INTEL.marketClosed('XAUUSD', Date.now())) await watch('ea-offline', 'The MT5 Expert Advisor has not reported for ' + Math.round(st.lastSeenSec / 60) + ' minutes, so no trades can be placed or managed. Check that MT5 is open on the VPS and the Algo Trading button is green.');
+    } catch (e) {}
+  }
   if (mode === 'paper') { res.paper = await resolvePaper(); await saveState(); return res; }
-  if ((all || mode === 'sod') && new Date().getUTCHours() >= CFG.sodHour && (!state.sod || state.sod.date !== today())) res.day = await dailySignal(false);
+  if (CFG.dailySignal && (all || mode === 'sod') && new Date().getUTCHours() >= CFG.sodHour && (!state.sod || state.sod.date !== today())) res.day = await dailySignal(false);
   if (all || mode === 'swing') res.swing = await swingAlerts();
   if (all || mode === 'scalp') res.scalp = await scalpAlerts(null, { dedupe: all });
   res.paper = await resolvePaper();
@@ -885,7 +912,7 @@ async function cmdSignal(sym, tf) {
   const { sg, fr } = await analyse(sym, tf), d = INSTR[sym].dec;
   if (fr.status === 'stale') return 'CHLOE: I will not judge ' + sym + ' ' + tf + ' right now. ' + frText(fr) + '.';
   if (sg.dir === 'WAIT') return ['CHLOE: no setup on ' + sym + ' ' + tf + ' now.', 'Leaning ' + sg.lean + ' at ' + sg.conf + '% but the filters do not pass.', sg.why, 'Data: ' + frText(fr) + '.'].join('\n');
-  return ['CHLOE: ' + sg.dir + ' ' + sym + ' ' + tf + ', ' + sg.conf + '% confidence', 'Strategy: ' + sg.stratName, ...planLines(sym, sg.plan, d), whyOf(sg.checks), hitLine(sym, tf, sg.stratName), 'Data: ' + frText(fr) + '.', DISCLAIMER].join('\n');
+  return ['CHLOE: ' + sg.dir + ' ' + sym + ' ' + tf + ', ' + 'setup score ' + sg.conf, 'Strategy: ' + sg.stratName, ...planLines(sym, sg.plan, d), whyOf(sg.checks), hitLine(sym, tf, sg.stratName), 'Data: ' + frText(fr) + '.', DISCLAIMER].join('\n');
 }
 function cmdWhyPast(symOrNull) {
   const list = state.paper.trades.filter(t => (!symOrNull || t.sym === symOrNull) && t.status === 'closed' && !t.void && typeof t.res.tp2 === 'number').slice(-4).reverse();
@@ -1102,7 +1129,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/' || p === '/index.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(path.join(STATIC_DIR, 'index.html'))); }
     if (p === '/health') {
       const n = newsCache ? newsCache.v : { feeds_ok: 0, feeds_total: CFG.feeds.length };
-      return send(res, 200, { ok: true, twelve_data_key: !!CFG.tdKey, telegram: !!(CFG.tgToken && CFG.tgChat), metaapi: !!(CFG.maToken && CFG.maAcc), btc_source: lastSource.BTCUSD || CFG.btcSource, credits_today: credits.day === today() ? credits.n : 0, credit_budget: CFG.tdBudget, credit_limit: CFG.creditLimit, sod_hour_utc: CFG.sodHour, last_sod: state.sod ? state.sod.date + ': ' + state.sod.txt : null, feeds_ok: n.feeds_ok, feeds_total: n.feeds_total, feeds: n.feeds || {}, data_order: CFG.dataOrder, fast_order: CFG.fastOrder, trial_alerts: state.trial !== false, proven_track: readiness().line, ready: state.ready, td_only: CFG.tdOnly, extra_sources: extraRows(), last_sources: lastSource, source_errors: srcErr, calendar: calStatus, tg_buttons: tgHook, watch: CFG.watch, scalp_watch: CFG.scalpWatch, strategy: CFG.stratMode, storage: UP.url ? 'upstash' : 'temp file (may reset on restart)', storage_error: storeErr, data_age: Object.fromEntries(CFG.watch.concat(CFG.scalpWatch).map(it => { const [sy, tf] = it.split(':'); return [it, ageOf(sy, (tf || 'H4').toUpperCase())]; })), storage_test: storageTest, paused: !!state.paused, uptime_min: Math.round((Date.now() - bootAt) / 60000), loaded_from: loadedFrom, validated: Object.keys(state.valid), last_report: state.lastReport || null, llm: !!CFG.llmKey, paper_open: state.paper.trades.filter(t => t.status !== 'closed').length, paper_closed: state.paper.trades.filter(t => t.status === 'closed').length });
+      return send(res, 200, { ok: true, broker_spread: state.spread || {}, fills: (state.fills || []).length, twelve_data_key: !!CFG.tdKey, telegram: !!(CFG.tgToken && CFG.tgChat), metaapi: !!(CFG.maToken && CFG.maAcc), btc_source: lastSource.BTCUSD || CFG.btcSource, credits_today: credits.day === today() ? credits.n : 0, credit_budget: CFG.tdBudget, credit_limit: CFG.creditLimit, sod_hour_utc: CFG.sodHour, last_sod: state.sod ? state.sod.date + ': ' + state.sod.txt : null, feeds_ok: n.feeds_ok, feeds_total: n.feeds_total, feeds: n.feeds || {}, data_order: CFG.dataOrder, fast_order: CFG.fastOrder, trial_alerts: state.trial !== false, proven_track: readiness().line, ready: state.ready, td_only: CFG.tdOnly, extra_sources: extraRows(), last_sources: lastSource, source_errors: srcErr, calendar: calStatus, tg_buttons: tgHook, watch: CFG.watch, scalp_watch: CFG.scalpWatch, strategy: CFG.stratMode, storage: UP.url ? 'upstash' : 'temp file (may reset on restart)', storage_error: storeErr, data_age: Object.fromEntries(CFG.watch.concat(CFG.scalpWatch).map(it => { const [sy, tf] = it.split(':'); return [it, ageOf(sy, (tf || 'H4').toUpperCase())]; })), storage_test: storageTest, paused: !!state.paused, uptime_min: Math.round((Date.now() - bootAt) / 60000), loaded_from: loadedFrom, validated: Object.keys(state.valid), last_report: state.lastReport || null, llm: !!CFG.llmKey, paper_open: state.paper.trades.filter(t => t.status !== 'closed').length, paper_closed: state.paper.trades.filter(t => t.status === 'closed').length });
     }
     if (p === '/api/candles') {
       const sym = (q.get('symbol') || 'XAUUSD').toUpperCase(), tf = (q.get('tf') || 'H4').toUpperCase();
@@ -1121,6 +1148,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/ea/poll' && req.method === 'POST') {
       let b = null; try { b = JSON.parse(await readBody(req)); } catch (e) {}
+      if (b && ENV.EA_KEY && b.key === ENV.EA_KEY) {
+        state.spread = state.spread || {}; state.slip = state.slip || {}; state.fills = state.fills || [];
+        if (b.spreads && typeof b.spreads === 'object') Object.keys(b.spreads).forEach(k => { const v = +b.spreads[k]; if (INSTR[k] && v > 0) state.spread[k] = state.spread[k] ? Math.round((state.spread[k] * 0.9 + v * 0.1) * 1e6) / 1e6 : v; });
+        (b.acks || []).forEach(k => { if (k && k.ok && isFinite(+k.slip)) { const t = (state.auto && state.auto.trades || []).find(x => x.id === +k.id); if (t) { state.slip[t.sym] = state.slip[t.sym] ? Math.round((state.slip[t.sym] * 0.8 + Math.abs(+k.slip) * 0.2) * 1e6) / 1e6 : Math.abs(+k.slip); state.fills.push({ at: Date.now(), sym: t.sym, slip: +k.slip, spread: state.spread[t.sym] || null }); if (state.fills.length > 100) state.fills.shift(); } } });
+      }
       const r = await AUTO.poll(b); res.writeHead(r.code, { 'content-type': 'text/plain' }); return res.end(r.text);
     }
     if (p === '/tg' && req.method === 'POST') {
