@@ -1923,7 +1923,9 @@ var STRAT_GUIDE={
   trend:['Needs higher highs and higher lows (or the reverse), then a pullback of 30 to 75 percent of the last swing, then a candle turning back with the trend.','Stop beyond the swing the pullback started from. Targets at the next levels.'],
   break:['A close through a swing high or low, a return to retest that level within a few candles, and a candle that holds it.','Stop beyond the retested level (0.4 ATR). Targets at the next levels.'],
   sweep:['Price spikes through a swing high or low (taking resting stop orders), closes back inside the range, and the next candle confirms the reversal.','Stop beyond the sweep wick. Targets at the next levels.'],
-  line:['Switches the chart to a line of closing prices and reads structure from that alone: higher closing highs and lows for an uptrend, and a fresh break of the last closing swing as the trigger.','Stop beyond the lowest low (or highest high) since the last opposite closing swing. Targets at the next levels.']
+  line:['Switches the chart to a line of closing prices and reads structure from that alone: higher closing highs and lows for an uptrend, and a fresh break of the last closing swing as the trigger.','Stop beyond the lowest low (or highest high) since the last opposite closing swing. Targets at the next levels.'],
+  crt:['Uses the previous 4 hour candle as the range. Waits for price to sweep its high or low, close back inside, then a strong candle away from the sweep.','Stop just beyond the sweep extreme, target the middle of the 4 hour range. 5 minute charts only, London and New York hours.'],
+  ema:['Needs the 20, 50 and 200 averages stacked in one direction, a dip to the 20 average, then a candle closing back with the trend.','Stop within 3 ATR, targets at 1.5R, 2R and 3R. 1 and 4 hour charts only; proven on gold 4 hour.']
 };
 function renderStratTab(){
   if(!S.sig||!S.sig.rank)return;
@@ -1948,7 +1950,7 @@ function buildGuide(){
   STRATS.forEach(function(s){
     var d=document.createElement('details');d.style.marginBottom='8px';
     d.appendChild(el('summary',null,s.name));
-    var g=STRAT_GUIDE[s.id];
+    var g=STRAT_GUIDE[s.id]||['See the strategy description above.','Standard risk plan applies.'];
     d.appendChild(el('p','note',s.blurb));d.appendChild(el('p','note','Looks for: '+g[0]));d.appendChild(el('p','note','Risk plan: '+g[1]));
     box.appendChild(d);
   });
