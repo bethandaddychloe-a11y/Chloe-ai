@@ -427,7 +427,7 @@ details[open] summary{margin-bottom:10px}
   <div class="card">
     <h2>Progress</h2>
     <p class="note" style="margin-top:0">Confirm the trades you really took and Chloe follows them: how far to the target, how much of your risk is used, and when to exit, hold, move the stop or add. It follows the rules, it does not predict.</p>
-    <label class="chk"><input id="chkAplus" type="checkbox">A+ only mode: alert me only for the strictest setups (every setup is still recorded for comparison)</label>
+    <label class="chk" style="display:none"><input id="chkAplus" type="checkbox">A+ only mode: alert me only for the strictest setups (every setup is still recorded for comparison)</label>
     <div id="pgTok" hidden style="margin-top:10px"><div class="note" style="margin-bottom:6px">Paste your admin token once so this phone can confirm trades. It is your RUN_TOKEN.</div><div class="row"><input id="pgTokIn" type="password" placeholder="Admin token" autocomplete="off"></div><div class="btns" style="margin-top:8px"><button class="btn" id="btnPgTok">Save token</button></div></div>
     <div class="note" id="pgMsg" style="margin-top:8px"></div>
   </div>
@@ -1754,7 +1754,7 @@ function renderConf(sg){
   var b=$('sigConf');
   if(S.source==='sample'){b.hidden=true;return}
   b.hidden=false;b.textContent='';
-  b.appendChild(el('span','conf '+confClass(sg.conf),(sg.dir==='WAIT'?'Lean '+sg.lean+' ':'')+'Confidence '+sg.conf+'%'));
+  b.appendChild(el('span','conf '+confClass(sg.conf),(sg.dir==='WAIT'?'Lean '+sg.lean+' ':'')+'Setup score '+sg.conf+' (not a win chance)'));
   b.appendChild(el('div','note','From the '+sg.stratName+' setup, '+sg.confW+' wins in '+sg.confN+' past setups of that strategy, and '+sg.confirm.n+' of 4 indicator confirmations'+(sg.near?'. Minus 10 for a nearby event':'')+'.'));
 }
 
@@ -1774,7 +1774,7 @@ function sodPick(rows){
 }
 function sodText(r){
   var p=r.plan,d=r.dec;
-  return ['CHLOE AI SIGNAL OF THE DAY',r.sym+' '+S.tf+' '+r.dir+'  ('+r.conf+'% confidence, '+r.strat+')','Entry: '+p.entry.toFixed(d),'SL: '+p.sl.toFixed(d)+' ('+(p.dist/r.pip).toFixed(1)+' pips)','TP1: '+p.tps[0].p.toFixed(d),'TP2: '+p.tps[1].p.toFixed(d),'TP3: '+p.tps[2].p.toFixed(d),'Lots: '+r.lots.toFixed(2)+' (risk '+num('riskPct',1)+'%)','Why: '+r.checks.filter(function(c){return c[1]}).map(function(c){return c[0]}).join('; ')].join('\n');
+  return ['CHLOE AI SIGNAL OF THE DAY',r.sym+' '+S.tf+' '+r.dir+'  (setup score '+r.conf+', '+r.strat+')','Entry: '+p.entry.toFixed(d),'SL: '+p.sl.toFixed(d)+' ('+(p.dist/r.pip).toFixed(1)+' pips)','TP1: '+p.tps[0].p.toFixed(d),'TP2: '+p.tps[1].p.toFixed(d),'TP3: '+p.tps[2].p.toFixed(d),'Lots: '+r.lots.toFixed(2)+' (risk '+num('riskPct',1)+'%)','Why: '+r.checks.filter(function(c){return c[1]}).map(function(c){return c[0]}).join('; ')].join('\n');
 }
 function renderSod(){
   var main=$('sodMain'),rowsBox=$('sodRows');main.textContent='';rowsBox.textContent='';
@@ -1961,7 +1961,7 @@ function scalpOpts(){
 }
 function scalpText(r){
   var p=r.plan,d=r.dec;
-  return ['CHLOE AI SCALP',r.sym+' '+SCO.tf+' '+r.dir+'  ('+r.conf+'% confidence, '+r.name+')','Entry: '+p.entry.toFixed(d),'SL: '+p.sl.toFixed(d)+' ('+(p.dist/r.pip).toFixed(1)+' pips)','TP1: '+p.tps[0].p.toFixed(d),'TP2: '+p.tps[1].p.toFixed(d),'TP3: '+p.tps[2].p.toFixed(d),'Lots: '+(r.lots==null?'-':r.lots.toFixed(2))+' (risk '+num('riskPct',1)+'%)'].join('\n');
+  return ['CHLOE AI SCALP',r.sym+' '+SCO.tf+' '+r.dir+'  (setup score '+r.conf+', '+r.name+')','Entry: '+p.entry.toFixed(d),'SL: '+p.sl.toFixed(d)+' ('+(p.dist/r.pip).toFixed(1)+' pips)','TP1: '+p.tps[0].p.toFixed(d),'TP2: '+p.tps[1].p.toFixed(d),'TP3: '+p.tps[2].p.toFixed(d),'Lots: '+(r.lots==null?'-':r.lots.toFixed(2))+' (risk '+num('riskPct',1)+'%)'].join('\n');
 }
 async function scalpScan(){
   if(scBusy)return;scBusy=true;$('btnScalp').disabled=true;$('btnScalp').textContent='Scanning...';
@@ -2028,6 +2028,7 @@ function srvStatus(){
     var ex=j.extra_sources||{};[['finnhub','Finnhub headlines'],['alphavantage','Alpha Vantage sentiment'],['fred','FRED official numbers']].forEach(function(p){var x=ex[p[0]];if(x)row(p[1],x.status,x.ok===true||x.ok===null&&!x.set)});
     row('Economic calendar',j.calendar&&j.calendar.ok?(j.calendar.n+' high-impact events this week'):('not loaded'+(j.calendar&&j.calendar.err?': '+j.calendar.err:'')),!!(j.calendar&&j.calendar.ok));
     row('Data used today',(j.credits_today||0)+' of '+(j.credit_budget||j.credit_limit||800)+' calls (stops at the limit)',(j.credits_today||0)<(j.credit_budget||j.credit_limit||800)*0.97);
+    row('Broker costs (from the EA)',j.broker_spread&&Object.keys(j.broker_spread).length?Object.keys(j.broker_spread).map(function(k){return k+' spread '+j.broker_spread[k]}).join(', ')+(j.fills?' ('+j.fills+' fills logged)':''):'waiting for the EA',j.broker_spread&&Object.keys(j.broker_spread).length?true:null);
     row('Daily signal sent at',(j.sod_hour_utc!=null?String(j.sod_hour_utc).padStart(2,'0')+':00 UTC':'-'),true);
     row('Last daily signal',j.last_sod||'not yet',!!j.last_sod);
     row('Records kept in',j.storage||'-',(j.storage||'').indexOf('upstash')===0);
