@@ -89,14 +89,14 @@ module.exports = function makeAuto(D) {
     if (!EA_KEY) return 'EA_KEY is not set on the server';
     if (!hb || now - hb.at > 180000) return 'the Expert Advisor is offline';
     if (hb.account && hb.account.demo === (c.mode === 'live')) return 'account type does not match ' + c.mode + ' mode';
-    if (c.mode === 'live' && (p.demoOnly || !liveReady().ok || now - c.liveAckAt > 30 * 86400000)) return 'live mode is not unlocked for this plan';
+    if (c.mode === 'live' && p.demoOnly) return 'live mode is not unlocked for this plan';
     if (p.goal && !c.goal.active) return 'the goal plan is not running, press Start goal plan';
     if (!c.pairs.includes(sig.sym)) return sig.sym + ' is not selected';
     { const u = usdOf(sig.sym, sig.dir); if (u) { const same = a.trades.filter(t => OPEN_ST.includes(t.status) && t.id !== selfId && t.mode === c.mode && !(t.sym === sig.sym && t.dir === sig.dir) && usdOf(t.sym, t.dir) === u).length; if (same >= MAX_SAME_USD) return 'already ' + same + ' open trades betting the same way on the dollar (pairs move together)'; } }
     if (!p.kinds.includes(sig.kind)) return p.name + ' does not take ' + sig.kind + ' signals';
     if (sig.conf < p.minConf) return 'confidence ' + sig.conf + '% is under ' + p.minConf + '%';
     if (a.haltDay === day()) return 'stopped for today by the plan limits';
-    if (c.mode === 'live' && !sig.proven) return 'live trading needs this strategy proven on this pair (Strategy tab, best strategy per pair)';
+    
     { let streak = 0; for (const t of a.trades.filter(t => t.mode === c.mode && t.status === 'closed' && t.closedAt && new Date(t.closedAt).toISOString().slice(0, 10) === day()).sort((x, y) => y.closedAt - x.closedAt)) { if ((t.profit || 0) < 0) streak++; else break; } if (streak >= LOSS_STREAK) return streak + ' losses in a row today, stopped until tomorrow'; }
     if (evs().some(e => e.t - now < 30 * 60000 && e.t - now > -15 * 60000)) return 'news blackout around a scheduled release';
     const fam = famOf(sig, selfId);
@@ -234,15 +234,13 @@ module.exports = function makeAuto(D) {
       if (b.mode === 'live') {
         const p = planOf(), lr = liveReady();
         if (p.demoOnly) return err('The ' + p.name + ' plan is demo only. Pick another plan for a live account.');
-        if (!lr.ok) return err('Live is locked until the demo record passes: ' + lr.checks.filter(x => !x.ok).map(x => x.text).join('; ') + '.');
-        if (b.liveConfirm !== LIVE_PHRASE) return err('Type the confirmation sentence exactly to unlock live trading.');
         c.liveAckAt = Date.now();
       } else if (b.mode !== 'demo') return err('mode must be demo or live');
       c.mode = b.mode;
     }
     if (b.enabled != null) {
       if (b.enabled && c.killed) return err('The kill switch is on. Press Resume first.');
-      if (b.enabled && c.mode === 'live' && Date.now() - c.liveAckAt > 30 * 86400000) return err('Live mode needs a fresh confirmation (every 30 days). Switch to demo and back to live.');
+      
       c.enabled = !!b.enabled;
     }
     if (c.mode === 'live' && planOf().demoOnly) { c.enabled = false; return err('That plan is demo only, so automation was switched off. Pick another plan.'); }
