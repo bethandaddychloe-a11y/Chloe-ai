@@ -235,6 +235,7 @@ var STRATS=[
   {id:'sweep',name:'Liquidity sweep',blurb:'Price spikes through a swing high or low to take stops, closes back inside, and a confirming candle follows.'},
   {id:'line',name:'Line-chart structure',blurb:'Structure read from closing prices only (line chart): trend in closes plus a fresh break of the last closing swing.'},
   {id:'crt',name:'CRT (range sweep)',blurb:'5 minute entries only. The last 4 hour candle is the range; price sweeps its high or low, closes back inside, a displacement candle follows, and the target is the middle of the range.'},
+  {id:'mom',name:'Momentum scalp',blurb:'1 and 5 minute entries. Enters on every closed candle that goes with the momentum (20 average over the 50 and the candle closing the same way). Stop behind the last 3 candles, targets 1R, 1.5R and 2.2R with a trailing stop.'},
   {id:'ema',name:'EMA pullback',blurb:'Swing (1 and 4 hour). 20, 50 and 200 averages stacked in one direction, price dips to the 20 average and closes back out in the trend direction.'}
 ];
 function stratName(id){for(var k=0;k<STRATS.length;k++)if(STRATS[k].id===id)return STRATS[k].name;return id}
@@ -366,18 +367,37 @@ function emaEval(cs,i,tf){
     [dist<=3*atr&&(en-sl)*sgn>0?'Stop is '+(dist/atr).toFixed(1)+' ATR':'Stop would be wider than 3 ATR',dist<=3*atr&&(en-sl)*sgn>0]];
   return {dir:up?'BUY':'SELL',conds:conds,ok:conds.every(function(k){return k[1]}),en:en,sl:sl,dist:dist};
 }
+/* momentum scalp: trades EVERY closed candle in the direction of the short-term momentum (20 above 50 and the candle closing with it) */
+var MOM={slMax:2};
+function momEval(cs,i,tf){
+  if((tf!=='M5'&&tf!=='M1')||i<60)return null;
+  var E=emaArr(cs)[i],c=cs[i],atr=atrAt(cs,i,14);if(!atr)return null;
+  var up=null;
+  if(E[0]>E[1]&&c.c>E[0]&&c.c>c.o)up=true;
+  else if(E[0]<E[1]&&c.c<E[0]&&c.c<c.o)up=false;
+  if(up==null)return null;
+  var l3=Math.min(cs[i].l,cs[i-1].l,cs[i-2].l),h3=Math.max(cs[i].h,cs[i-1].h,cs[i-2].h),en=c.c,sl=up?l3-0.1*atr:h3+0.1*atr;
+  if(Math.abs(en-sl)>MOM.slMax*atr)sl=up?en-1.5*atr:en+1.5*atr; /* very wide stop: use 1.5 ATR instead of skipping the candle */
+  var dist=Math.abs(en-sl);
+  var conds=[
+    ['20 average '+(up?'above':'below')+' the 50 average and price '+(up?'above':'below')+' the 20',true],
+    ['Candle closed '+(up?'up':'down')+', in the direction of the momentum',true],
+    ['Stop is '+(dist/atr).toFixed(1)+' ATR',dist>0]];
+  return {dir:up?'BUY':'SELL',conds:conds,ok:conds.every(function(q){return q[1]}),en:en,sl:sl,dist:dist};
+}
 function runCustom(id,cs,i,tf){
-  var e=id==='crt'?crtEval(cs,i,tf):emaEval(cs,i,tf),name=stratName(id);
-  if(!e)return {id:id,name:name,dir:'WAIT',lean:'WAIT',q:0,checks:[[id==='crt'?'No sweep of the last 4 hour range with a displacement candle right now (needs the 5 minute chart)':'No pullback to the 20 average inside a clean trend right now (needs the 1 or 4 hour chart)',false]],plan:null,zones:[],score:0};
+  var e=id==='crt'?crtEval(cs,i,tf):(id==='mom'?momEval(cs,i,tf):emaEval(cs,i,tf)),name=stratName(id);
+  if(!e)return {id:id,name:name,dir:'WAIT',lean:'WAIT',q:0,checks:[[id==='mom'?'No fresh momentum breakout on the 1 or 5 minute chart right now':id==='crt'?'No sweep of the last 4 hour range with a displacement candle right now (needs the 5 minute chart)':'No pullback to the 20 average inside a clean trend right now (needs the 1 or 4 hour chart)',false]],plan:null,zones:[],score:0};
   if(!e.ok)return {id:id,name:name,dir:'WAIT',lean:e.dir,q:0.3,checks:e.conds,plan:null,zones:[],score:2};
   var sgn=e.dir==='BUY'?1:-1,lv=levelsOf(pivots(cs,i),e.en),tps;
   if(id==='crt')tps=[{p:e.mid,kind:'MID'},{p:e.mid,kind:'MID'},{p:e.mid,kind:'MID'}];
+  else if(id==='mom')tps=[1,1.5,2.2].map(function(m){return {p:e.en+sgn*m*e.dist,kind:'R'}});
   else tps=[1.5,2,3].map(function(m){return {p:e.en+sgn*m*e.dist,kind:'R'}});
   var plan={dir:e.dir,entry:e.en,sl:e.sl,dist:e.dist,tps:tps,nearOpp:(sgn>0?lv.res:lv.sup)[0]!=null?(sgn>0?lv.res:lv.sup)[0]:null,sup:lv.sup[0],res:lv.res[0]};
   return {id:id,name:name,dir:e.dir,lean:e.dir,q:0.8,checks:e.conds,plan:plan,zones:[],score:6};
 }
 function runStrat(id,cs,i,tf,bias,minScore,x,paBase){
-  if(id==='crt'||id==='ema')return runCustom(id,cs,i,tf);
+  if(id==='crt'||id==='ema'||id==='mom')return runCustom(id,cs,i,tf);
   x=x||ctxAt(cs,i,tf,bias);
   if(id==='pa'){return wrapPA(paBase||decide(scoreAt(cs,i,bias,tf),minScore,false),i)}
   var best=null;
@@ -462,7 +482,7 @@ function analyseAll(cs,tf,bias,mode,minScore,block,near){
 }
 /* ---- scalping profile: same rules, lower timeframe, tighter stop, fixed small targets, extra filters ---- */
 var SCALP_DEF={tf:'M5',slAtr:1.5,rr:[1,1.5,2.2],target:1,minConfirm:2,minScore:5,session:true,cost:0.1};
-var SCALP_ORDER=['crt','smc','sweep','sr','trend','break','line','pa'];
+var SCALP_ORDER=['crt','mom','smc','sweep','sr','trend','break','line','pa'];
 function inSession(sym,ms){
   if(sym==='BTCUSD')return true;
   var d=new Date(ms||Date.now()),h=d.getUTCHours(),w=d.getUTCDay();
@@ -473,6 +493,7 @@ function scalpPick(cs,i,tf,bias,o,x){
   for(var k=0;k<SCALP_ORDER.length;k++){
     var r=runStrat(SCALP_ORDER[k],cs,i,tf,bias,o.minScore,x);
     if(r.dir==='WAIT'||!r.plan)continue;
+    if(r.id==='mom')return {ok:true,id:r.id,name:r.name,dir:r.dir,q:r.q,checks:r.checks,plan:r.plan,confirm:indConfirm(cs,i,r.dir),why:'Momentum scalp: entered with the 20 and 50 averages and the candle direction'};
     if(r.id==='crt'){var cfc=indConfirm(cs,i,r.dir);return {ok:true,id:r.id,name:r.name,dir:r.dir,q:r.q,checks:r.checks.concat(cfc.items),plan:r.plan,confirm:cfc,why:'CRT range sweep with displacement, target the middle of the 4 hour range'}}
     var atr=x.atr,dist=r.plan.dist;
     if(dist>o.slAtr*atr){lastFail=r.name+': stop is '+(dist/atr).toFixed(1)+' ATR, wider than the '+o.slAtr+' ATR scalp limit';continue}
