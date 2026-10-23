@@ -53,7 +53,7 @@ const INSTR = {
 const TF_TD = { M1: '1min', M5: '5min', M15: '15min', H1: '1h', H4: '4h', D1: '1day' };
 const TF_BN = { M1: '1m', M5: '5m', M15: '15m', H1: '1h', H4: '4h', D1: '1d' };
 const TF_MIN = { M1: 1, M5: 5, M15: 15, H1: 60, H4: 240, D1: 1440 };
-const TTL = { M1: 58, M5: 285, M15: 600, H1: 1800, H4: 3000, D1: 3500 }; // longer waits keep the free Twelve Data credits for the whole day
+const TTL = { M1: 58, M5: 285, M15: 600, H1: 3300, H4: 7000, D1: 14000 }; // longer waits keep the free Twelve Data credits for the whole day
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const doFetch = (...a) => global.fetch(...a);
 
@@ -117,7 +117,7 @@ async function binanceCandles(tf, size) {
   if (!Array.isArray(j)) throw new Error((j && j.msg) || 'Binance refused the request');
   return j.map(x => ({ t: stamp(x[0]), o: +x[1], h: +x[2], l: +x[3], c: +x[4] }));
 }
-const YH = { XAUUSD: 'XAUUSD=X', BTCUSD: 'BTC-USD', USDJPY: 'JPY=X', GBPUSD: 'GBPUSD=X', USTEC: 'NQ=F' };
+const YH = { XAGUSD: 'SI=F', XAUUSD: 'XAUUSD=X', BTCUSD: 'BTC-USD', USDJPY: 'JPY=X', GBPUSD: 'GBPUSD=X', USTEC: 'NQ=F' };
 const YH_IV = { M1: '1m', M5: '5m', M15: '15m', H1: '60m', H4: '60m', D1: '1d' }, YH_RANGE = { M1: '5d', M5: '30d', M15: '30d', H1: '60d', H4: '6mo', D1: '2y' };
 async function yahooCandles(sym, tf, size) {
   if (!YH[sym]) throw new Error('Yahoo has no symbol for ' + sym);
@@ -147,11 +147,12 @@ async function getCandles(sym, tf, size, force) {
   if (!TF_TD[tf]) throw new Error('Unsupported timeframe');
   if (!/^[A-Z]{6}$|^USTEC$/.test(sym)) throw new Error('Unsupported symbol');
   { const bc = size <= 500 && brokerGet(sym, tf, { M1: 150, M5: 700, M15: 1500, H1: 5400, H4: 21600 }[tf] || 700); if (bc) { lastSource[sym] = 'broker'; return bc.slice(-size); } }
-  const key = sym + '|' + tf + '|' + size, hit = cache.get(key);
+  const want = size; if (size <= 500) size = 500; // one saved copy per symbol and timeframe: every size is cut from it, so each screen no longer costs its own credit
+  const key = sym + '|' + tf + '|' + size, hit = cache.get(key), cut = c => c && want < c.length && size <= 500 ? Object.assign(c.slice(-want), c.fellBack ? { fellBack: c.fellBack } : {}) : c;
   const ttl = (size > 500 ? 6 * 3600 : TTL[tf]) * 1000;
-  if (hit && Date.now() - hit.at < (force ? Math.min(ttl, 20000) : ttl)) return hit.cs;
-  if (hit && sym !== 'BTCUSD' && INTEL.marketClosed(sym, Date.now()) && Date.now() - hit.at > 0 && hit.cs.length && INTEL.marketClosed(sym, hit.at + 60000)) return hit.cs; // market shut and the saved candles were fetched after it shut: nothing new can arrive, so spend no credit
-  const base = CFG.tdOnly.includes(sym) ? ['td'] : ['M5', 'M15', 'H1'].includes(tf) && CFG.fastOrder.length ? CFG.fastOrder : (CFG.dataOrder.length ? CFG.dataOrder : ['td']); // gold and Nasdaq stay on Twelve Data: Yahoo has no matching gold price and its Nasdaq is a futures price // fast charts ask Yahoo first so the free Twelve Data credits last the day
+  if (hit && Date.now() - hit.at < (force ? Math.min(ttl, 20000) : ttl)) return cut(hit.cs);
+  if (hit && sym !== 'BTCUSD' && INTEL.marketClosed(sym, Date.now()) && Date.now() - hit.at > 0 && hit.cs.length && INTEL.marketClosed(sym, hit.at + 60000)) return cut(hit.cs); // market shut and the saved candles were fetched after it shut: nothing new can arrive, so spend no credit
+  const base = CFG.tdOnly.includes(sym) ? ['td'] : ['M5', 'M15', 'H1', 'H4'].includes(tf) && CFG.fastOrder.length ? CFG.fastOrder : (CFG.dataOrder.length ? CFG.dataOrder : ['td']); // gold and Nasdaq stay on Twelve Data: Yahoo has no matching gold price and its Nasdaq is a futures price // fast charts ask Yahoo first so the free Twelve Data credits last the day
   const order = sym === 'BTCUSD' && CFG.btcSource !== 'td' ? ['binance'].concat(base) : base;
   let err = null;
   for (const src of order) {
@@ -160,10 +161,13 @@ async function getCandles(sym, tf, size, force) {
       if (cs.length < 70) throw new Error('too few candles');
       lastSource[sym] = src; errRun[sym + ':' + src] = 0; delete srcErr[sym + ':' + src];
       const late = INTEL.freshness(sym, tf, dropForming(cs, tf), Date.now(), false).status === 'stale'; // stale candles are only kept for a minute, so the next call asks the provider again
-      cache.set(key, { at: late ? Date.now() - ttl + 60000 : Date.now(), cs }); return cs;
+      cache.set(key, { at: late ? Date.now() - ttl + 60000 : Date.now(), cs }); return cut(cs);
     } catch (e) { err = err || e; srcErr[sym + ':' + src] = e.message; errRun[sym + ':' + src] = (errRun[sym + ':' + src] || 0) + 1; }
   }
-  if (hit) { hit.cs.fellBack = err ? err.message : 'provider failed'; return hit.cs; } // flagged, and the stale-data guard refuses to trade on it
+  if (hit) { hit.cs.fellBack = err ? err.message : 'provider failed'; return cut(hit.cs); }
+  if (CFG.tdOnly.includes(sym) && YH[sym] && tf !== 'M1') { // credits gone: show approximate Yahoo prices so the app is never blank. Flagged, so no trade or alert is ever based on them
+    try { const cs = await yahooCandles(sym, tf, size); if (cs.length >= 70) { cs.fellBack = 'Twelve Data credits used up today, showing approximate Yahoo prices (not used for trades)'; lastSource[sym] = 'yahoo (approx)'; cache.set(key, { at: Date.now() - ttl + 120000, cs }); return cut(cs); } } catch (e2) { /* fall through to the original error */ }
+  } // flagged, and the stale-data guard refuses to trade on it
   throw err;
 }
 function dropForming(cs, tf) {
@@ -824,6 +828,7 @@ async function scalpAlerts(items, opt) {
     if (inBlackout()) { out.push({ sym, tf, result: 'news blackout (' + CFG.newsBefore + ' min before to ' + CFG.newsAfter + ' min after a high-impact release)' }); continue; }
     if (opt.dedupe && scanned[item] >= bnd) { out.push({ sym, tf, result: 'already scanned at this candle close' }); continue; }
     if (sym === 'USTEC' && !usOpen()) { out.push({ sym, tf, result: 'Nasdaq prices only move in US hours (14:30 to 19:30 UTC), skipped to save data credits' }); continue; }
+    if ((sym === 'XAGUSD' || sym === 'USTEC') && tf === 'M5' && !brokerGet(sym, 'M5', 700)) { out.push({ sym, tf, result: 'silver and Nasdaq 5 minute scans wait for broker prices, so the free data credits go to gold' }); continue; }
     if (tf === 'M1' && !brokerGet(sym, 'M1', 150)) { out.push({ sym, tf, result: 'waiting for 1 minute prices from your broker (the Expert Advisor sends them)' }); continue; }
     try {
       curDec = INSTR[sym].dec;
