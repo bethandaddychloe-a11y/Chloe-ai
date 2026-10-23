@@ -34,7 +34,7 @@ const CFG = {
   llmKey: ENV.ANTHROPIC_API_KEY || '', llmModel: ENV.LLM_MODEL || 'claude-haiku-5-5', llmDaily: +(ENV.LLM_DAILY_LIMIT || 20),
   tdPerMin: +(ENV.TD_PER_MIN || 8), creditLimit: +(ENV.TD_DAILY_LIMIT || 800),
   finnhubKey: ENV.FINNHUB_API_KEY || '', avKey: ENV.ALPHAVANTAGE_API_KEY || '', fredKey: ENV.FRED_API_KEY || '', avMaxDay: +(ENV.AV_MAX_PER_DAY || 12),
-  alertPairs: (ENV.ALERT_PAIRS == null ? 'XAUUSD' : ENV.ALERT_PAIRS).split(',').map(x => x.trim().toUpperCase()).filter(Boolean), alertStrats: (ENV.ALERT_STRATS == null ? 'CRT (range sweep),EMA pullback' : ENV.ALERT_STRATS).split(',').map(x => x.trim()).filter(Boolean), // trial alerts only for these; everything else is recorded quietly until it is proven
+  alertPairs: (ENV.ALERT_PAIRS == null ? 'XAUUSD,BTCUSD' : ENV.ALERT_PAIRS).split(',').map(x => x.trim().toUpperCase()).filter(Boolean), alertStrats: (ENV.ALERT_STRATS == null ? 'CRT (range sweep),EMA pullback' : ENV.ALERT_STRATS).split(',').map(x => x.trim()).filter(Boolean), // trial alerts only for these; everything else is recorded quietly until it is proven
   newsBefore: +(ENV.NEWS_BLACKOUT_BEFORE || 30), newsAfter: +(ENV.NEWS_BLACKOUT_AFTER || 15), dailySignal: ENV.DAILY_SIGNAL === '1',
   tdBudget: +(ENV.TD_BUDGET || 780), tdReserve: +(ENV.TD_RESERVE || 220), // hard stop on Twelve Data calls per day; the last part is kept for 5 and 1 minute scalp scans
   tdOnly: (ENV.TD_ONLY == null ? 'XAUUSD,XAGUSD,USTEC' : ENV.TD_ONLY).split(',').map(x => x.trim().toUpperCase()).filter(Boolean),
@@ -706,7 +706,7 @@ function tierOf(sym, tf, strat) {
 }
 const tierHead = (tier, word) => tier.proven ? 'CHLOE AI: PROVEN' + (tier.via === 'backtest' ? ' (2 years of tests)' : '') + ' ' + word : 'CHLOE AI: TRIAL ' + word + ' (not proven yet, demo only)';
 const tierLine = tier => tier.proven ? 'Proof: ' + (tier.via === 'backtest' ? 'profitable in both 2025 and 2026 gold prices after costs (thin edge, small sample, keep risk small).' : tier.via === 'history' ? 'this strategy held up on the part of the price history it was not tuned on.' : 'this strategy has a good live paper record on this pair.') : 'Proof: none yet for this strategy on this pair. Treat it as practice.';
-const trialAllowed = (sym, strat) => state.trial !== false && CFG.alertPairs.includes(sym) && CFG.alertStrats.includes(strat);
+const trialAllowed = (sym, strat) => state.trial !== false && CFG.alertPairs.includes(sym) && (sym === 'BTCUSD' || CFG.alertStrats.includes(strat)); // BTC (24/7) may use any strategy
 const quietWhy = () => state.trial === false ? 'trial alerts are off' : 'not proven yet, so it is only recorded (trial alerts are limited to ' + CFG.alertPairs.join('/') + ' with ' + CFG.alertStrats.join(' and ') + ')';
 function provenCombos() {
   const out = SEEDS.map(x => x.sym + ' ' + x.tf + ' ' + x.strat + ' (backtest)');
