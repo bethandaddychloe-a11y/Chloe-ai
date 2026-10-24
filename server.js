@@ -71,6 +71,7 @@ async function loadState() {
   state.paper = state.paper || { trades: [], keys: {}, seq: 0 };
   state.forecasts = state.forecasts || {};
   if (state.cred && state.cred.day === today()) { credits.day = state.cred.day; credits.n = Math.max(credits.n, +state.cred.n || 0); }
+  state.priceAlerts = Array.isArray(state.priceAlerts) ? state.priceAlerts : [];
   state.alerts = state.alerts || {}; state.counts = state.counts || {}; state.valid = state.valid || {}; state.rules = state.rules || {}; state.paused = !!state.paused; state.aplus = !!state.aplus; state.trial = state.trial !== false; state.ready = state.ready || {}; state.my = state.my || { seq: 0, list: [] }; state.llmUse = state.llmUse || {};
   AUTO.init();
 }
@@ -1061,11 +1062,72 @@ async function llmAsk(text) {
     const j = await r.json(); return j && j.content && j.content[0] && j.content[0].text ? j.content[0].text : null;
   } catch (e) { return null; }
 }
+
+/* ---------- price alerts: "tell me when gold touches 4200". Checked every few seconds while the server is awake, and on every cron /run, using the candles' highs and lows since you set it, so a touch while the server slept is still caught ---------- */
+const alertSeen = {};
+async function recentCandles(sym) {
+  const b = brokerGet(sym, 'M5', 600); if (b) return b.slice(-200);
+  try { return await yahooCandles(sym, 'M5', 200); } catch (e) {}
+  if (sym === 'BTCUSD') { try { return await binanceCandles('M5', 200); } catch (e) {} }
+  return null;
+}
+function candMs(c) { return Date.parse(String(c.t).replace(' ', 'T') + 'Z'); }
+async function lastPrice(sym) { const cs = await recentCandles(sym); return cs && cs.length ? cs[cs.length - 1].c : null; }
+async function addPriceAlert(sym, price, note) {
+  if (!Array.isArray(state.priceAlerts)) state.priceAlerts = [];
+  sym = String(sym || '').toUpperCase(); price = +price;
+  if (!PAIRS.includes(sym)) return { error: 'Pick one of: ' + PAIRS.join(', ') };
+  if (!(price > 0)) return { error: 'Give a price, for example /alert gold 4200' };
+  const act = state.priceAlerts.filter(x => !x.hit); if (act.length >= 20) return { error: 'You already have 20 active alerts. Remove one first.' };
+  const now = await lastPrice(sym); if (now == null) return { error: 'Cannot read the live price for ' + sym + ' right now, try again in a minute.' };
+  if (Math.abs(price - now) / now < 0.00005) return { error: sym + ' is already at ' + price + '.' };
+  const id = (state.priceAlerts.reduce((m, x) => Math.max(m, x.id), 0) || 0) + 1;
+  const al = { id, sym, price, dir: price > now ? 'above' : 'below', from: now, created: Date.now(), note: String(note || '').slice(0, 80), hit: null };
+  state.priceAlerts.push(al); state.priceAlerts = state.priceAlerts.filter(x => !x.hit || Date.now() - x.hit < 3 * 86400000).slice(-60); await saveState(); return { ok: true, alert: al };
+}
+function fmtAlert(a) { const d = INSTR[a.sym].dec; return '#' + a.id + ' ' + a.sym + ' ' + (a.dir === 'above' ? 'rises to' : 'falls to') + ' ' + a.price.toFixed(d) + (a.note ? ' (' + a.note + ')' : '') + (a.hit ? '  TOUCHED ' + stamp(a.hit).slice(5, 16) + ' UTC' : ''); }
+async function checkPriceAlerts() {
+  if (!Array.isArray(state.priceAlerts)) state.priceAlerts = [];
+  const act = state.priceAlerts.filter(x => !x.hit); if (!act.length) return 0;
+  let fired = 0; const syms = [...new Set(act.map(x => x.sym))];
+  for (const sym of syms) {
+    if (alertSeen[sym] && Date.now() - alertSeen[sym] < 40000) continue; alertSeen[sym] = Date.now();
+    const cs = await recentCandles(sym); if (!cs || !cs.length) continue;
+    const px = cs[cs.length - 1].c, d = INSTR[sym].dec;
+    for (const a of act.filter(x => x.sym === sym)) {
+      const from = a.created - 300000, seen = cs.filter(c => candMs(c) >= from);
+      const hitC = seen.find(c => a.dir === 'above' ? c.h >= a.price : c.l <= a.price);
+      if (!hitC) continue;
+      a.hit = Date.now(); fired++;
+      telegram('PRICE ALERT: ' + sym + ' ' + (a.dir === 'above' ? 'rose to' : 'fell to') + ' ' + a.price.toFixed(d) + '.\nNow about ' + px.toFixed(d) + ' (touched around ' + String(hitC.t).slice(11, 16) + ' UTC).' + (a.note ? '\nYour note: ' + a.note : '') + '\nOpen Chloe to check the chart and the signal.').catch(() => {});
+    }
+  }
+  if (fired) await saveState();
+  return fired;
+}
+async function cmdAlert(q) {
+  if (!Array.isArray(state.priceAlerts)) state.priceAlerts = [];
+  const raw = q.raw.toLowerCase(), words = q.args;
+  if (q.cmd === 'alerts' || /^(list|show)$/.test(words[0] || '')) {
+    const act = state.priceAlerts.filter(x => !x.hit), done = state.priceAlerts.filter(x => x.hit).slice(-5);
+    return (act.length ? 'ACTIVE ALERTS\n' + act.map(fmtAlert).join('\n') : 'No active alerts. Set one with /alert gold 4200') + (done.length ? '\n\nRECENTLY TOUCHED\n' + done.map(fmtAlert).join('\n') : '');
+  }
+  if (words[0] === 'clear' || words[0] === 'removeall') { const n = state.priceAlerts.filter(x => !x.hit).length; state.priceAlerts = state.priceAlerts.filter(x => x.hit); await saveState(); return 'Removed ' + n + ' alert' + (n === 1 ? '' : 's') + '.'; }
+  if (words[0] === 'remove' || words[0] === 'delete' || words[0] === 'cancel') {
+    const id = +words[1]; const i = state.priceAlerts.findIndex(x => x.id === id); if (i < 0) return 'No alert with that number. /alerts shows them.';
+    state.priceAlerts.splice(i, 1); await saveState(); return 'Removed alert #' + id + '.';
+  }
+  const nums = (raw.replace(/\b(m1|m5|m15|h1|h4|d1)\b/g, ' ').match(/\d[\d,]*\.?\d*/g) || []).map(x => +x.replace(/,/g, '')).filter(x => x > 0);
+  if (!q.sym || !nums.length) return 'Tell me the pair and the price, for example: /alert gold 4200  or  /alert btc 70000';
+  const r = await addPriceAlert(q.sym, nums[0], '');
+  return r.error ? r.error : 'Alert set. I will message you here when ' + fmtAlert(r.alert).slice(String(r.alert.id).length + 2) + '. Checked every few seconds while Chloe is awake and on every cron run, so keep the cron-job.org ping running.';
+}
 async function runCommand(text, control) {
   const q = CHAT.parse(text), sym = q.sym || 'XAUUSD', tf = q.tf || 'H4';
   try {
     switch (q.cmd) {
       case 'help': return CHAT.HELP;
+      case 'alert': case 'alerts': return await cmdAlert(q);
       case 'status': return await cmdStatus();
       case 'signal': return await cmdSignal(sym, tf);
       case 'why': return /\b(los[et]|lose|fail|stopp|wrong|won|worked|win|went)/.test(q.raw.toLowerCase()) ? cmdWhyPast(q.sym) : await cmdWhy(sym, tf);
@@ -1185,6 +1247,14 @@ const server = http.createServer(async (req, res) => {
       if (p === '/api/auto/kill') return send(res, 200, await AUTO.kill(b.closeAll !== false));
       if (p === '/api/auto/resume') return send(res, 200, await AUTO.resume());
     }
+    if (p === '/api/alerts' || p === '/api/alerts/remove') {
+      if (!AUTO.isAdmin(req.headers['x-admin'] || q.get('token'))) return send(res, 403, { error: 'admin token needed' });
+      if (!Array.isArray(state.priceAlerts)) state.priceAlerts = [];
+      if (req.method === 'GET') return send(res, 200, { alerts: state.priceAlerts.filter(x => !x.hit), done: state.priceAlerts.filter(x => x.hit).slice(-5) });
+      let b = {}; try { b = JSON.parse(await readBody(req) || '{}'); } catch (e) {}
+      if (p === '/api/alerts/remove') { const i = state.priceAlerts.findIndex(x => x.id === +b.id); if (i >= 0) { state.priceAlerts.splice(i, 1); await saveState(); } return send(res, 200, { ok: true, alerts: state.priceAlerts.filter(x => !x.hit) }); }
+      const r = await addPriceAlert(b.sym, b.price, b.note); return send(res, r.error ? 400 : 200, r.error ? r : { ok: true, alert: r.alert, alerts: state.priceAlerts.filter(x => !x.hit) });
+    }
     if (p === '/api/forecast') return send(res, 200, await forecasts());
     if (p === '/api/forecast/result' && req.method === 'POST') {
       if (!AUTO.isAdmin(req.headers['x-admin'] || q.get('token'))) return send(res, 403, { error: 'admin token needed' });
@@ -1258,7 +1328,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/broker') return send(res, 200, await broker());
     if (p === '/run') {
       if (!CFG.runToken || q.get('token') !== CFG.runToken) return send(res, 403, { error: 'bad token' });
-      return send(res, 200, await runJobs(q.get('mode')));
+      const alFired = await checkPriceAlerts().catch(() => 0); const rj = await runJobs(q.get('mode')); if (rj && typeof rj === 'object') rj.priceAlertsFired = alFired; return send(res, 200, rj);
     }
     send(res, 404, { error: 'not found' });
   } catch (e) { send(res, /Unsupported/.test(e.message) ? 400 : 502, { error: e.message }); }
@@ -1281,5 +1351,5 @@ async function scalpTick() {
     if (due.length) await saveState();
   } catch (e) { console.log('scalp timer: ' + e.message); } finally { timerBusy = false; }
 }
-if (require.main === module) ready.then(() => server.listen(CFG.port, () => { setInterval(() => { scalpTick(); }, 10000); console.log('Chloe server on ' + CFG.port); ensureWebhook().catch(() => {}); refreshCalendar().catch(() => {}); getFred().catch(() => {}); }));
-module.exports = { brokerPut, brokerGet, scalpAlerts, scalpTick, scanned, SCALP, readyCheck, readiness, tierOf, cmdTrial, aplusCheck, paperIdFor, TRACK, enterTrade, closeMy, trackJob, viewMy, cmdProgress, INTEL, runCommand, buildDayReport, sendDayReport, queueValidation, pumpValidation, bestPerPair, monitorChecks, runStorageTest, gateFor, hitLine, analyse, AUTO, MACRO, forecasts, server, CFG, runJobs, getCandles, getNews, state, ready, resolveTrade, recordPaper, paperReport, statsOf };
+if (require.main === module) ready.then(() => server.listen(CFG.port, () => { setInterval(() => { scalpTick(); checkPriceAlerts().catch(() => {}); }, 10000); console.log('Chloe server on ' + CFG.port); ensureWebhook().catch(() => {}); refreshCalendar().catch(() => {}); getFred().catch(() => {}); }));
+module.exports = { checkPriceAlerts, addPriceAlert, runCommand, state, brokerPut, brokerGet, scalpAlerts, scalpTick, scanned, SCALP, readyCheck, readiness, tierOf, cmdTrial, aplusCheck, paperIdFor, TRACK, enterTrade, closeMy, trackJob, viewMy, cmdProgress, INTEL, runCommand, buildDayReport, sendDayReport, queueValidation, pumpValidation, bestPerPair, monitorChecks, runStorageTest, gateFor, hitLine, analyse, AUTO, MACRO, forecasts, server, CFG, runJobs, getCandles, getNews, state, ready, resolveTrade, recordPaper, paperReport, statsOf };
