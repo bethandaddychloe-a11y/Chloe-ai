@@ -249,6 +249,13 @@ details[open] summary{margin-bottom:10px}
     <div id="tvwrap" hidden></div>
     <div id="indwrap" hidden style="margin-top:4px"><canvas id="chartInd" role="img" aria-label="RSI or Stochastic strip under the chart"></canvas></div>
     <div class="note" style="margin-top:8px"><span style="color:var(--swing)">&#9679;</span> Swing points &nbsp; Dotted lines are key levels &nbsp; <a id="tvLink" href="https://www.tradingview.com/" target="_blank" rel="noopener">Open in TradingView</a></div>
+    <div id="alBox" style="margin-top:12px">
+      <b>Price alert</b> <span class="note">Chloe sends a Telegram message when price touches it, even while you sleep.</span>
+      <div style="display:flex;gap:8px;margin-top:6px"><input id="alPrice" type="number" step="any" inputmode="decimal" placeholder="Price for this pair" style="flex:1;min-width:0"><button class="btn primary" id="alSet">Set alert</button></div>
+      <div class="btns" style="margin-top:6px"><button class="btn" id="alHi">4H high</button><button class="btn" id="alLo">4H low</button></div>
+      <div id="alList" style="margin-top:8px;display:grid;gap:6px"></div>
+      <div class="note" id="alMsg" style="margin-top:6px"></div>
+    </div>
     <div id="sessBar" style="margin-top:8px" hidden></div>
   </div>
 
@@ -1620,6 +1627,8 @@ function tvSync(){
   if(bb){bb.setAttribute('aria-pressed',S.big?'true':'false');bb.classList.toggle('on',!!S.big)}
   if(bf)bf.textContent=S.fs?'Close full screen':'Full screen';
   $('chartCard').classList.toggle('fs',!!S.fs);
+  var tb=document.querySelectorAll('.tool[data-tool]');for(var q=0;q<tb.length;q++){tb[q].disabled=on;tb[q].style.opacity=on?'.4':''}
+  var th=$('toolHint');if(th){if(on){th.hidden=false;th.textContent='You are on the TradingView chart. Chloe\'s Trendline, Level and Zone tools only draw on Chloe\'s own chart. Use the drawing tools on the left side of the TradingView chart here, or tap "Chloe chart" to use Chloe\'s tools.';th.setAttribute('data-tv','1')}else if(th.getAttribute('data-tv')){th.hidden=true;th.removeAttribute('data-tv')}}
 }
 function drawChart(){
   var wrap=$('chartwrap'),cv=$('chart');
@@ -1671,6 +1680,7 @@ function drawChart(){
   ctx.setLineDash([]);
   if(S.showLiq&&sessOK())drawLiq(ctx,cs,candT(cs),st,X,Y,lo,hi,w,padR,css('--font-mono'));
   if(IND)drawIndOverlay(ctx,IND,cs,st,X,Y,lo,hi,w,padR,padL,d);
+  (S.alerts||[]).forEach(function(a){if(a.sym!==S.sym||a.price<lo||a.price>hi)return;var y=Y(a.price);ctx.save();ctx.strokeStyle='#ff7ad9';ctx.fillStyle='#ff7ad9';ctx.lineWidth=1.4;ctx.setLineDash([4,3]);ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(w-padR,y);ctx.stroke();ctx.setLineDash([]);ctx.font='bold 9px '+css('--font-mono');ctx.textAlign='left';ctx.fillText('ALERT '+a.price,padL+4,y-6);ctx.restore()});
   if(S.showZones&&sg.zones&&sg.zones.length){
     ctx.font='9px '+css('--font-mono');
     sg.zones.forEach(function(z){
@@ -2851,6 +2861,9 @@ function setTool(t){
 }
 Array.prototype.forEach.call(document.querySelectorAll('.tool[data-tool]'),function(b){b.addEventListener('click',function(){setTool(b.dataset.tool)})});
 bind('btnUndo',function(){curDraw().pop();saveDraw();drawChart()},'click');
+bind('alSet',setAlert,'click');
+bind('alHi',function(){var r=range4h(S.candles);if(r)$('alPrice').value=r.hi.toFixed(INSTR[S.sym].dec)},'click');
+bind('alLo',function(){var r=range4h(S.candles);if(r)$('alPrice').value=r.lo.toFixed(INSTR[S.sym].dec)},'click');
 bind('btnBig',function(){S.big=!S.big;saveView();tvSync();drawChart()},'click');
 bind('btnFs',function(){S.fs=!S.fs;document.body.style.overflow=S.fs?'hidden':'';tvSync();drawChart();var c=$('chartCard');if(c&&S.fs)c.scrollTop=0},'click');
 bind('btnTv',function(){S.tv=!S.tv;tvSync();if(!S.tv)drawChart()},'click');
@@ -2879,7 +2892,28 @@ $('chart').addEventListener('pointercancel',function(){S.draft=null;drawChart()}
 /* TradingView link */
 var TVSYM={XAUUSD:'OANDA:XAUUSD',USDJPY:'OANDA:USDJPY',EURUSD:'OANDA:EURUSD',GBPUSD:'OANDA:GBPUSD',USDCAD:'OANDA:USDCAD',USDCHF:'OANDA:USDCHF',AUDUSD:'OANDA:AUDUSD',NZDUSD:'OANDA:NZDUSD',USTEC:'OANDA:NAS100USD',BTCUSD:'COINBASE:BTCUSD'};
 var TVINT={M1:'1',M5:'5',M15:'15',H1:'60',H4:'240',D1:'D'};
-function updateTv(){try{if(S.tv)tvSync()}catch(e){}var sy=TVSYM[S.sym]||('OANDA:'+L());$('tvLink').setAttribute('href','https://www.tradingview.com/chart/?symbol='+encodeURIComponent(sy)+'&interval='+TVINT[S.tf])}
+function loadAlerts(){
+  if(typeof HOSTED!=='undefined'&&!HOSTED)return;
+  if(!admTok()){renderAlerts();return}
+  api('/api/alerts').then(function(j){if(j._code===403){S.alerts=[];renderAlerts('Add your admin token in the Auto tab first, then alerts work.');return}S.alerts=j.alerts||[];renderAlerts();drawChart()}).catch(function(){})
+}
+function renderAlerts(msg){
+  var box=$('alList');if(!box)return;box.textContent='';
+  (S.alerts||[]).forEach(function(a){
+    var row=el('div');row.style.cssText='display:flex;justify-content:space-between;align-items:center;gap:8px;border:1px solid var(--line);border-radius:10px;padding:6px 10px';
+    row.appendChild(el('span','mono',a.sym+'  '+(a.dir==='above'?'rises to ':'falls to ')+a.price));
+    var rm=el('button','btn','Remove');rm.addEventListener('click',function(){api('/api/alerts/remove','POST',{id:a.id}).then(function(j){S.alerts=j.alerts||[];renderAlerts();drawChart()})});row.appendChild(rm);box.appendChild(row)});
+  var m=$('alMsg');if(m&&msg!==undefined)m.textContent=msg;
+  if(m&&msg===undefined&&!admTok())m.textContent='Add your admin token in the Auto tab first, then alerts work.';
+}
+function setAlert(){
+  var v=parseFloat($('alPrice').value);if(!(v>0)){renderAlerts('Type a price first.');return}
+  if(!admTok()){renderAlerts('Add your admin token in the Auto tab first, then alerts work.');return}
+  api('/api/alerts','POST',{sym:S.sym,price:v}).then(function(j){
+    if(j.error){renderAlerts(j.error==='admin token needed'?'That admin token was not accepted. Check it in the Auto tab.':j.error);return}
+    S.alerts=j.alerts||[];$('alPrice').value='';renderAlerts('Alert set. Chloe will message you on Telegram when '+S.sym+' touches '+v+'.');drawChart()});
+}
+function updateTv(){try{if(S.tv)tvSync()}catch(e){}try{if(Date.now()-(S.alAt||0)>60000){S.alAt=Date.now();loadAlerts()}}catch(e){}var sy=TVSYM[S.sym]||('OANDA:'+L());$('tvLink').setAttribute('href','https://www.tradingview.com/chart/?symbol='+encodeURIComponent(sy)+'&interval='+TVINT[S.tf])}
 
 /* tabs */
 var TABS=['signal','scalp','strat','news','auto','broker','more','data','risk','test','journal','ask','progress','chartcheck'];
