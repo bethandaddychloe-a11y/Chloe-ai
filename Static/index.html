@@ -100,6 +100,8 @@ textarea{font-family:var(--font-mono);font-size:12px;min-height:120px;resize:ver
 .note{font-size:12px;color:var(--muted)}
 .warnbox{border:1px solid var(--warn);border-radius:10px;padding:9px 11px;font-size:12px;color:var(--fg);background:var(--surface2)}
 #chartwrap{width:100%}
+#chartCard.fs{position:fixed;left:0;top:0;right:0;bottom:0;z-index:60;margin:0;border-radius:0;overflow:auto;background:var(--bg);padding:10px 10px 30px}
+#tvwrap iframe{width:100%;border:0;border-radius:10px;display:block}
 canvas{display:block;max-width:100%}
 #chart{touch-action:pan-y}
 .ai-out{white-space:pre-wrap;font-size:13px;line-height:1.55;border-left:3px solid var(--accent);padding-left:11px}
@@ -234,6 +236,9 @@ details[open] summary{margin-bottom:10px}
       <button class="btn tool" data-tool="trend" aria-pressed="false">Trendline</button>
       <button class="btn tool" data-tool="h" aria-pressed="false">Level</button>
       <button class="btn tool" data-tool="rect" aria-pressed="false">Zone</button>
+      <button class="btn tool" id="btnBig" aria-pressed="false">Bigger</button>
+      <button class="btn tool" id="btnFs">Full screen</button>
+      <button class="btn tool" id="btnTv" aria-pressed="false">TradingView</button>
       <button class="btn tool" id="btnUndo">Undo</button>
       <button class="btn tool" id="btnClearDraw">Clear</button>
       <select id="ctype" aria-label="Chart type"><option value="candles">Candles</option><option value="line">Line</option></select>
@@ -241,6 +246,7 @@ details[open] summary{margin-bottom:10px}
     </div>
     <div class="note" id="toolHint" hidden style="margin-bottom:8px"></div>
     <div id="chartwrap"><canvas id="chart" role="img" aria-label="Candlestick chart with swing points, key support and resistance, and the signal's entry, stop loss and take profits"></canvas></div>
+    <div id="tvwrap" hidden></div>
     <div id="indwrap" hidden style="margin-top:4px"><canvas id="chartInd" role="img" aria-label="RSI or Stochastic strip under the chart"></canvas></div>
     <div class="note" style="margin-top:8px"><span style="color:var(--swing)">&#9679;</span> Swing points &nbsp; Dotted lines are key levels &nbsp; <a id="tvLink" href="https://www.tradingview.com/" target="_blank" rel="noopener">Open in TradingView</a></div>
     <div id="sessBar" style="margin-top:8px" hidden></div>
@@ -765,7 +771,7 @@ var G=null;
 function jget(k){try{return JSON.parse(localStorage.getItem(k)||'{}')||{}}catch(e){return {}}}
 function jset(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
 S.draw=jget(DKEY);S.base=jget(BKEY);S.news=jget(NKEY);
-S.stratMode=jget('chloe.strat.v1').mode||'auto';if(['auto','combine','ema','rsi','sbb','pa','smc','break','crt'].indexOf(S.stratMode)<0)S.stratMode='auto';var VW=jget('chloe.view.v1');S.showZones=VW.zones!==false;S.showSess=VW.sess!==false;S.showLiq=VW.liq!==false;S.showInd=VW.ind!==false;S.ctype=VW.ctype||'candles';
+S.stratMode=jget('chloe.strat.v1').mode||'auto';if(['auto','combine','ema','rsi','sbb','pa','smc','break','crt'].indexOf(S.stratMode)<0)S.stratMode='auto';var VW=jget('chloe.view.v1');S.showZones=VW.zones!==false;S.showSess=VW.sess!==false;S.showLiq=VW.liq!==false;S.showInd=VW.ind!==false;S.big=!!VW.big;S.fs=false;S.tv=false;S.ctype=VW.ctype||'candles';
 function saveDraw(){jset(DKEY,S.draw)}
 function curDraw(){return S.draw[S.sym]||(S.draw[S.sym]=[])}
 
@@ -1594,10 +1600,31 @@ function drawIndPanel(P,cs,st,N,w,padL,padR){
     ctx.fillStyle=dir>0?colB:colS;ctx.beginPath();ctx.arc(X(j),Y(P.panel==='rsi'?A.rsi[j]:A.stK[j]),4,0,7);ctx.fill();
   }
 }
+function chartH(w){
+  if(S.fs)return Math.max(360,Math.min(900,window.innerHeight-(S.showInd?250:150)));
+  if(S.big)return Math.round(Math.min(680,Math.max(460,w*1.45)));
+  return Math.round(Math.min(440,Math.max(300,w*0.95)));
+}
+function tvSync(){
+  var box=$('tvwrap'),cw=$('chartwrap'),iw=$('indwrap');if(!box)return;
+  var on=!!S.tv;box.hidden=!on;cw.hidden=on;
+  if(on){iw.hidden=true;var sy=TVSYM[S.sym]||('OANDA:'+S.sym),m=S.stratMode,st=[];
+    if(m==='rsi')st.push('RSI@tv-basicstudies');else if(m==='sbb'){st.push('BB@tv-basicstudies');st.push('Stochastic@tv-basicstudies')}else if(m==='ema'){st.push('MAExp@tv-basicstudies');st.push('MAExp@tv-basicstudies')}
+    var url='https://s.tradingview.com/widgetembed/?symbol='+encodeURIComponent(sy)+'&interval='+TVINT[S.tf]+'&theme=dark&style=1&timezone=Etc%2FUTC&withdateranges=1&hide_side_toolbar=0&allow_symbol_change=0&saveimage=0&studies='+encodeURIComponent(JSON.stringify(st));
+    var h=chartH(cw.clientWidth||box.clientWidth||360)+(S.fs?0:100),f=box.firstChild;
+    if(!f||f.getAttribute('data-u')!==url){box.textContent='';f=document.createElement('iframe');f.setAttribute('data-u',url);f.src=url;f.title='TradingView chart';f.setAttribute('loading','lazy');box.appendChild(f)}
+    f.style.height=h+'px';
+  }
+  var bt=$('btnTv'),bb=$('btnBig'),bf=$('btnFs');
+  if(bt){bt.setAttribute('aria-pressed',on?'true':'false');bt.classList.toggle('on',on);bt.textContent=on?'Chloe chart':'TradingView'}
+  if(bb){bb.setAttribute('aria-pressed',S.big?'true':'false');bb.classList.toggle('on',!!S.big)}
+  if(bf)bf.textContent=S.fs?'Close full screen':'Full screen';
+  $('chartCard').classList.toggle('fs',!!S.fs);
+}
 function drawChart(){
   var wrap=$('chartwrap'),cv=$('chart');
   if(!wrap.clientWidth||!S.sig)return;
-  var w=wrap.clientWidth,h=Math.round(Math.min(440,Math.max(300,w*0.95))),ctx=setupCanvas(cv,w,h);
+  var w=wrap.clientWidth,h=chartH(w),ctx=setupCanvas(cv,w,h);
   var cs=S.candles,N=Math.min(S.view,cs.length),st=cs.length-N,d=INSTR[S.sym].dec,sg=S.sig;
   var padL=4,padR=58,top=8,priceH=h-8,plotW=w-padL-padR;
   var colMut=css('--muted'),colLine=css('--line'),colBuy=css('--buy'),colSell=css('--sell'),colFg=css('--fg'),swing=css('--swing'),acc=css('--accent');
@@ -2522,7 +2549,7 @@ function drawLiq(ctx,cs,T,st,X,Y,lo,hi,w,padR,font){
   });
   ctx.restore();
 }
-function saveView(){jset('chloe.view.v1',{zones:S.showZones,ctype:S.ctype,sess:S.showSess,liq:S.showLiq,ind:S.showInd})}
+function saveView(){jset('chloe.view.v1',{zones:S.showZones,ctype:S.ctype,sess:S.showSess,liq:S.showLiq,ind:S.showInd,big:S.big})}
 function nowSession(){
   var now=Date.now(),d0=Math.floor(now/DAY)*DAY,defs=sessDefs(d0),act=defs.filter(function(x){return now>=x.a&&now<x.b}),dow=new Date(now).getUTCDay(),hr=new Date(now).getUTCHours();
   var closed=(dow===6)||(dow===0&&hr<21)||(dow===5&&hr>=21);
@@ -2824,6 +2851,10 @@ function setTool(t){
 }
 Array.prototype.forEach.call(document.querySelectorAll('.tool[data-tool]'),function(b){b.addEventListener('click',function(){setTool(b.dataset.tool)})});
 bind('btnUndo',function(){curDraw().pop();saveDraw();drawChart()},'click');
+bind('btnBig',function(){S.big=!S.big;saveView();tvSync();drawChart()},'click');
+bind('btnFs',function(){S.fs=!S.fs;document.body.style.overflow=S.fs?'hidden':'';tvSync();drawChart();var c=$('chartCard');if(c&&S.fs)c.scrollTop=0},'click');
+bind('btnTv',function(){S.tv=!S.tv;tvSync();if(!S.tv)drawChart()},'click');
+window.addEventListener('resize',function(){if(S.fs||S.tv){tvSync();if(!S.tv)drawChart()}});
 bind('btnClearDraw',function(){S.draw[S.sym]=[];saveDraw();drawChart()},'click');
 bind('view',function(){S.view=parseInt($('view').value,10)||70;drawChart()},'change');
 function toData(e){
@@ -2848,7 +2879,7 @@ $('chart').addEventListener('pointercancel',function(){S.draft=null;drawChart()}
 /* TradingView link */
 var TVSYM={XAUUSD:'OANDA:XAUUSD',USDJPY:'OANDA:USDJPY',EURUSD:'OANDA:EURUSD',GBPUSD:'OANDA:GBPUSD',USDCAD:'OANDA:USDCAD',USDCHF:'OANDA:USDCHF',AUDUSD:'OANDA:AUDUSD',NZDUSD:'OANDA:NZDUSD',USTEC:'OANDA:NAS100USD',BTCUSD:'COINBASE:BTCUSD'};
 var TVINT={M1:'1',M5:'5',M15:'15',H1:'60',H4:'240',D1:'D'};
-function updateTv(){var sy=TVSYM[S.sym]||('OANDA:'+L());$('tvLink').setAttribute('href','https://www.tradingview.com/chart/?symbol='+encodeURIComponent(sy)+'&interval='+TVINT[S.tf])}
+function updateTv(){try{if(S.tv)tvSync()}catch(e){}var sy=TVSYM[S.sym]||('OANDA:'+L());$('tvLink').setAttribute('href','https://www.tradingview.com/chart/?symbol='+encodeURIComponent(sy)+'&interval='+TVINT[S.tf])}
 
 /* tabs */
 var TABS=['signal','scalp','strat','news','auto','broker','more','data','risk','test','journal','ask','progress','chartcheck'];
