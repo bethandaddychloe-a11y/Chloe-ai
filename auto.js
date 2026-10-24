@@ -7,7 +7,7 @@ const LIVE_PHRASE = 'I ACCEPT THE RISK OF REAL LOSSES';
 const PLANS = {
   steady: { id: 'steady', name: 'Steady', desc: 'Small fixed risk, swing signals only, strict daily stop. The sensible first plan.', risk: 0.5, maxOpen: 2, maxDay: 3, dayLoss: 2, weekLoss: 4, ddStop: 8, tp: 'tp2', kinds: ['swing'], minConf: 60 },
   standard: { id: 'standard', name: 'Standard', desc: 'One percent risk, swings and scalps, moderate limits.', risk: 1, maxOpen: 3, maxDay: 5, dayLoss: 3, weekLoss: 6, ddStop: 12, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55 },
-  scalper: { id: 'scalper', name: 'Scalper', desc: 'Scalps only (gold, silver, Nasdaq). Risks half a percent of your CURRENT equity per trade, so lot size rises as the account grows and falls after losses. A trailing stop locks in profit once a trade is working.', risk: 0.5, maxOpen: 5, maxDay: 200, dayLoss: 2.5, weekLoss: 5, ddStop: 10, tp: 'tp2', kinds: ['scalp'], minConf: 50 },
+  scalper: { id: 'scalper', name: 'Aggressive Scalper', desc: 'The only mode. Scalps every pair on the 5 minute chart, risks a share of your CURRENT equity so lots grow with the account, and uses a trailing stop. Just switch it on or off.', risk: 0.5, maxOpen: 5, maxDay: 200, dayLoss: 15, weekLoss: 30, ddStop: 50, tp: 'tp2', kinds: ['scalp'], minConf: 50 },
   grow: { hidden: true, id: 'grow', name: 'Step-up', desc: 'Starts at 1% and adds 0.25% after each win up to 2%. A loss drops it back to 1%. Raises risk only while winning.', risk: 1, ramp: { step: 0.25, max: 2 }, maxOpen: 3, maxDay: 5, dayLoss: 3, weekLoss: 7, ddStop: 12, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55 },
   target: { id: 'target', name: 'Daily target', desc: 'One percent risk. Stops for the day after gaining 3% or losing 2%, then waits for tomorrow.', risk: 1, maxOpen: 2, maxDay: 4, dayLoss: 2, dayGain: 3, weekLoss: 5, ddStop: 10, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55 },
   goal: { hidden: true, id: 'goal', name: 'Goal plan', desc: 'You set a start, a target and a number of trades. Chloe works out the risk per trade needed to get there and trades it, rolling all profit into the next trade. Demo only.', risk: 10, maxOpen: 1, maxDay: 3, dayLoss: 60, weekLoss: 90, ddStop: 85, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55, demoOnly: true, goal: true },
@@ -30,6 +30,7 @@ module.exports = function makeAuto(D) {
     if (!a.cfg.pairsV) { a.cfg.pairsV = 2; ['XAGUSD', 'USTEC', 'XAUUSD'].forEach(s => { if (!a.cfg.pairs.includes(s)) a.cfg.pairs.push(s); }); } // silver joined the list
     if (PLANS[a.cfg.plan] && PLANS[a.cfg.plan].hidden) a.cfg.plan = 'scalper';
     a.cfg.scale = Object.assign({ on: true, addAtR: 1, maxAdds: 2, addFrac: 0.5 }, a.cfg.scale || {}); a.cfg.approval = a.cfg.approval === 'auto' ? 'auto' : 'ask';
+    a.cfg.plan = 'scalper'; a.cfg.approval = 'auto'; a.cfg.scale.on = false; a.cfg.pairs = ['XAUUSD', 'XAGUSD', 'USTEC', 'USDJPY', 'GBPUSD', 'BTCUSD']; // one fixed mode: nothing to configure
     a.trades = a.trades || []; a.seq = a.seq || 0; a.hb = a.hb || null; a.acct = a.acct || { peak: 0, day: null, week: null }; a.haltDay = a.haltDay || null; a.closeAllPending = !!a.closeAllPending;
     return a;
   }
@@ -148,6 +149,7 @@ module.exports = function makeAuto(D) {
     if (!EA_KEY || !b || b.key !== EA_KEY) return { code: 403, text: 'DENIED' };
     const acc = b.account || {};
     a.hb = { at: now, account: { login: acc.login, server: acc.server, balance: +acc.balance, equity: +acc.equity, currency: acc.currency, demo: !!acc.demo, leverage: acc.leverage, tradeAllowed: acc.tradeAllowed !== false }, positions: Array.isArray(b.positions) ? b.positions.slice(0, 30) : [] };
+    c.mode = a.hb.account.demo ? 'demo' : 'live'; c.liveAckAt = now; // the mode simply follows the account the EA is logged in to
     const eq = a.hb.account.equity, ac = a.acct, msgs = []; sweep();
     if (!ac.day || ac.day.date !== day()) ac.day = { date: day(), start: eq };
     if (!ac.week || ac.week.key !== weekKey()) ac.week = { key: weekKey(), start: eq };
@@ -215,6 +217,7 @@ module.exports = function makeAuto(D) {
   /* ---- controls from the page (admin token required by the caller) ---- */
   async function setConfig(b) {
     const a = A(), c = a.cfg, err = m => ({ ok: false, error: m });
+    ['plan', 'custom', 'goal', 'goalStart', 'mode', 'pairs', 'approval', 'scale', 'liveConfirm'].forEach(k => { delete b[k]; }); // only the on/off switch is left
     if (b.plan != null) { if (!PLANS[b.plan]) return err('unknown plan'); if (PLANS[b.plan].hidden) return err('That plan is switched off while Chloe has no proven edge. It raises risk faster than the evidence allows.'); c.plan = b.plan; }
     if (b.custom) { const x = b.custom, cap = c.mode === 'live' ? MAX_LIVE_RISK : 50; c.custom = { risk: num(x.risk, 0.1, cap, 0.5), maxOpen: Math.round(num(x.maxOpen, 1, 5, 2)), maxDay: Math.round(num(x.maxDay, 1, 10, 3)), dayLoss: num(x.dayLoss, 0.5, 50, 2), weekLoss: num(x.weekLoss, 1, 80, 4), ddStop: num(x.ddStop, 2, 80, 8), tp: ['tp1', 'tp2', 'tp3'].includes(x.tp) ? x.tp : 'tp2', kinds: ['swing', 'scalp'].filter(k => (x.kinds || []).includes(k)), minConf: Math.round(num(x.minConf, 40, 85, 60)), dayGain: x.dayGain ? num(x.dayGain, 0.5, 100, 0) || undefined : undefined }; if (!c.custom.kinds.length) c.custom.kinds = ['swing']; }
     if (b.goal) { const x = b.goal, g = c.goal, st = num(x.start, 1, 1000000, g.start), tg = num(x.target, 2, 100000000, g.target), n = Math.round(num(x.trades, 2, 40, g.trades)); if (tg <= st * 1.05) return err('The target must be higher than the start.'); c.goal = Object.assign(g, { start: st, target: tg, trades: n, tp: ['tp1', 'tp2', 'tp3'].includes(x.tp) ? x.tp : g.tp, stopOnLoss: x.stopOnLoss == null ? g.stopOnLoss : !!x.stopOnLoss }); }
