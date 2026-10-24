@@ -241,6 +241,7 @@ details[open] summary{margin-bottom:10px}
     </div>
     <div class="note" id="toolHint" hidden style="margin-bottom:8px"></div>
     <div id="chartwrap"><canvas id="chart" role="img" aria-label="Candlestick chart with swing points, key support and resistance, and the signal's entry, stop loss and take profits"></canvas></div>
+    <div id="indwrap" hidden style="margin-top:4px"><canvas id="chartInd" role="img" aria-label="RSI or Stochastic strip under the chart"></canvas></div>
     <div class="note" style="margin-top:8px"><span style="color:var(--swing)">&#9679;</span> Swing points &nbsp; Dotted lines are key levels &nbsp; <a id="tvLink" href="https://www.tradingview.com/" target="_blank" rel="noopener">Open in TradingView</a></div>
     <div id="sessBar" style="margin-top:8px" hidden></div>
   </div>
@@ -376,6 +377,7 @@ details[open] summary{margin-bottom:10px}
     <label class="chk"><input id="shZones" type="checkbox" checked>Show order blocks and fair value gaps</label>
     <label class="chk"><input id="shSess" type="checkbox" checked>Show trading sessions (Asia, London, New York)</label>
     <label class="chk"><input id="shLiq" type="checkbox" checked>Show session and previous-day highs and lows (liquidity)</label>
+    <label class="chk"><input id="shInd" type="checkbox" checked>Show strategy lines (4 hour high and low, Bollinger bands, averages, RSI and Stochastic, signal arrows)</label>
     <p class="note" style="margin-bottom:0">Switch between candles and a closing-price line with the selector above the chart on the Signal tab. The line view labels each closing swing HH, HL, LH or LL.</p>
   </div>
   <div class="card">
@@ -763,7 +765,7 @@ var G=null;
 function jget(k){try{return JSON.parse(localStorage.getItem(k)||'{}')||{}}catch(e){return {}}}
 function jset(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
 S.draw=jget(DKEY);S.base=jget(BKEY);S.news=jget(NKEY);
-S.stratMode=jget('chloe.strat.v1').mode||'auto';if(['auto','combine','ema','rsi','sbb','pa','smc','break','crt'].indexOf(S.stratMode)<0)S.stratMode='auto';var VW=jget('chloe.view.v1');S.showZones=VW.zones!==false;S.showSess=VW.sess!==false;S.showLiq=VW.liq!==false;S.ctype=VW.ctype||'candles';
+S.stratMode=jget('chloe.strat.v1').mode||'auto';if(['auto','combine','ema','rsi','sbb','pa','smc','break','crt'].indexOf(S.stratMode)<0)S.stratMode='auto';var VW=jget('chloe.view.v1');S.showZones=VW.zones!==false;S.showSess=VW.sess!==false;S.showLiq=VW.liq!==false;S.showInd=VW.ind!==false;S.ctype=VW.ctype||'candles';
 function saveDraw(){jset(DKEY,S.draw)}
 function curDraw(){return S.draw[S.sym]||(S.draw[S.sym]=[])}
 
@@ -1166,7 +1168,7 @@ function stopPlan(cs,i,up){
   return {en:en,sl:sl,dist:Math.abs(en-sl),atr:atr};
 }
 function rsiEval(cs,i,tf){
-  if(tf!=='H4'||i<210)return null;
+  if(tf!=='H4'||i<60)return null;
   var R=indArr(cs).rsi,up=null;
   if(R[i-1]<30&&R[i]>=30)up=true;else if(R[i-1]>70&&R[i]<=70)up=false;
   if(up==null)return null;
@@ -1178,14 +1180,14 @@ function rsiEval(cs,i,tf){
   return {dir:up?'BUY':'SELL',conds:conds,ok:P.dist>0,en:P.en,sl:P.sl,dist:P.dist};
 }
 function sbbAt(cs,j,A){
-  if(j<210)return 0;
+  if(j<60)return 0;
   var c=cs[j].c;
   if(c>A.bbu[j]&&A.stK[j]>A.stD[j]&&A.stK[j]<80)return 1;
   if(c<A.bbl[j]&&A.stK[j]<A.stD[j]&&A.stK[j]>20)return -1;
   return 0;
 }
 function sbbEval(cs,i,tf){
-  if(tf!=='H1'||i<211)return null;
+  if(tf!=='H1'||i<61)return null;
   var A=indArr(cs),b=sbbAt(cs,i,A);
   if(!b||sbbAt(cs,i-1,A)===b)return null; /* only the first candle of a run */
   var up=b>0,P=stopPlan(cs,i,up);
@@ -1501,6 +1503,97 @@ function setupCanvas(cv,w,h){
   cv.width=Math.round(w*dpr);cv.height=Math.round(h*dpr);cv.style.width=w+'px';cv.style.height=h+'px';
   var ctx=cv.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);return ctx;
 }
+
+/* ---- strategy lines: 4 hour high and low, Bollinger bands, averages, RSI and Stochastic strips, signal arrows ---- */
+function emaArr(cs,per){
+  var key='_e'+per,c=cs[key];if(c&&c.n===cs.length)return c.a;
+  var n=cs.length,a=new Array(n),k=2/(per+1),j;
+  for(j=0;j<n;j++)a[j]=j===0?cs[0].c:cs[j].c*k+a[j-1]*(1-k);
+  try{Object.defineProperty(cs,key,{value:{n:n,a:a},writable:true,configurable:true,enumerable:false})}catch(e){}
+  return a;
+}
+function range4h(cs){
+  var n=cs.length;if(n<3)return null;
+  if(S.tf==='H4'){var p=cs[n-2];return {hi:p.h,lo:p.l,si:n-2}}
+  if(S.tf==='D1')return null;
+  var T=candT(cs);if(!T)return null;
+  var B=14400000,bn=Math.floor(T[n-1]/B),hi=-Infinity,lo=Infinity,si=-1,j;
+  for(j=n-1;j>=0;j--){var b=Math.floor(T[j]/B);if(b===bn-1){hi=Math.max(hi,cs[j].h);lo=Math.min(lo,cs[j].l);si=j}else if(b<bn-1)break}
+  return si<0?null:{hi:hi,lo:lo,si:si};
+}
+function indPlan(cs){
+  if(!cs||cs.length<60||S.ctype==='line')return null;
+  var auto=S.stratMode==='auto'||S.stratMode==='combine',m=S.stratMode;
+  var P={r4:range4h(cs),bb:m==='sbb'||(auto&&S.tf==='H1'),ema:m==='ema',panel:null};
+  if(m==='rsi'||(auto&&S.tf==='H4'))P.panel='rsi';
+  else if(m==='sbb'||(auto&&S.tf==='H1'))P.panel='sto';
+  return P;
+}
+function drawIndOverlay(ctx,P,cs,st,X,Y,lo,hi,w,padR,padL,d){
+  var mono=css('--font-mono'),n=cs.length,j,A=indArr(cs),colB=css('--buy'),colS=css('--sell');
+  ctx.save();ctx.beginPath();ctx.rect(padL,0,w-padR-padL,9999);ctx.clip();
+  if(P.r4){
+    var x0=Math.max(padL,X(P.r4.si)-3),yH=Y(P.r4.hi),yL=Y(P.r4.lo),yM=Y((P.r4.hi+P.r4.lo)/2);
+    ctx.globalAlpha=.08;ctx.fillStyle='#e0a100';ctx.fillRect(x0,yH,w-padR-x0,Math.max(1,yL-yH));ctx.globalAlpha=1;
+    ctx.strokeStyle='#e0a100';ctx.lineWidth=1.6;ctx.setLineDash([7,3]);
+    ctx.beginPath();ctx.moveTo(x0,yH);ctx.lineTo(w-padR,yH);ctx.moveTo(x0,yL);ctx.lineTo(w-padR,yL);ctx.stroke();
+    ctx.lineWidth=1;ctx.setLineDash([2,4]);ctx.beginPath();ctx.moveTo(x0,yM);ctx.lineTo(w-padR,yM);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle='#e0a100';ctx.font='bold 9px '+mono;ctx.textAlign='right';
+    ctx.fillText('4H HIGH '+P.r4.hi.toFixed(d),w-padR-4,yH-6);ctx.fillText('4H LOW '+P.r4.lo.toFixed(d),w-padR-4,yL+9);ctx.fillText('MID',w-padR-4,yM-6);
+  }
+  function line(arr,col,wd){ctx.strokeStyle=col;ctx.lineWidth=wd;ctx.beginPath();var f=true;for(j=st;j<n;j++){if(!isFinite(arr[j])){continue}var x=X(j),y=Y(arr[j]);if(f){ctx.moveTo(x,y);f=false}else ctx.lineTo(x,y)}ctx.stroke()}
+  if(P.bb){
+    var mid=[];for(j=0;j<n;j++)mid.push(isFinite(A.bbu[j])?(A.bbu[j]+A.bbl[j])/2:NaN);
+    line(A.bbu,'#8e6bff',1.3);line(A.bbl,'#8e6bff',1.3);ctx.setLineDash([3,3]);line(mid,'#8e6bff',.8);ctx.setLineDash([]);
+    ctx.fillStyle='#8e6bff';ctx.font='9px '+mono;ctx.textAlign='left';ctx.fillText('Bollinger (20, 2)',padL+4,Y(lo)-10);
+  }
+  if(P.ema){
+    line(emaArr(cs,20),'#e0a100',1.4);line(emaArr(cs,50),'#4aa3ff',1.4);line(emaArr(cs,200),'#b0b0b0',1.4);
+    ctx.font='9px '+mono;ctx.textAlign='left';ctx.fillStyle='#e0a100';ctx.fillText('EMA 20',padL+4,Y(lo)-10);ctx.fillStyle='#4aa3ff';ctx.fillText('EMA 50',padL+48,Y(lo)-10);ctx.fillStyle='#b0b0b0';ctx.fillText('EMA 200',padL+92,Y(lo)-10);
+  }
+  /* arrows where the rule was met */
+  ctx.font='bold 9px '+mono;ctx.textAlign='center';
+  for(j=Math.max(st,61);j<n;j++){
+    var dir=0;
+    if(P.panel==='rsi'){if(A.rsi[j-1]<30&&A.rsi[j]>=30)dir=1;else if(A.rsi[j-1]>70&&A.rsi[j]<=70)dir=-1}
+    else if(P.bb){var b1=sbbAt(cs,j,A);if(b1&&sbbAt(cs,j-1,A)!==b1)dir=b1}
+    if(!dir)continue;
+    var x=X(j),y=dir>0?Y(cs[j].l)+12:Y(cs[j].h)-12;ctx.fillStyle=dir>0?colB:colS;ctx.beginPath();
+    if(dir>0){ctx.moveTo(x,y-7);ctx.lineTo(x-6,y+3);ctx.lineTo(x+6,y+3)}else{ctx.moveTo(x,y+7);ctx.lineTo(x-6,y-3);ctx.lineTo(x+6,y-3)}
+    ctx.closePath();ctx.fill();
+    if(j===n-1){ctx.fillText(dir>0?'RULE MET: BUY':'RULE MET: SELL',Math.min(Math.max(x,padL+48),w-padR-48),dir>0?y+16:y-10)}
+  }
+  ctx.restore();
+}
+function drawIndPanel(P,cs,st,N,w,padL,padR){
+  var box=$('indwrap'),cv=$('chartInd');if(!box||!cv)return;
+  if(!P||!P.panel){box.hidden=true;return}
+  box.hidden=false;
+  var h=96,ctx=setupCanvas(cv,w,h),plotW=w-padL-padR,A=indArr(cs),n=cs.length,mono=css('--font-mono'),j;
+  var colMut=css('--muted'),colLine=css('--line'),colB=css('--buy'),colS=css('--sell');
+  function X(k){return padL+(k-st+0.5)*(plotW/N)}
+  function Y(v){return 8+(100-v)/100*(h-16)}
+  ctx.font='9px '+mono;ctx.textBaseline='middle';ctx.lineWidth=1;
+  var lv=P.panel==='rsi'?[30,70]:[20,80];
+  ctx.fillStyle=colMut;ctx.globalAlpha=.1;ctx.fillRect(padL,Y(lv[1]),plotW,Y(lv[0])-Y(lv[1]));ctx.globalAlpha=1;
+  ctx.strokeStyle=colLine;ctx.setLineDash([3,3]);
+  [lv[0],50,lv[1]].forEach(function(v){ctx.beginPath();ctx.moveTo(padL,Y(v));ctx.lineTo(w-padR,Y(v));ctx.stroke();ctx.fillStyle=colMut;ctx.textAlign='left';ctx.fillText(String(v),w-padR+5,Y(v))});
+  ctx.setLineDash([]);
+  function line(arr,col,wd){ctx.strokeStyle=col;ctx.lineWidth=wd;ctx.beginPath();var f=true;for(j=st;j<n;j++){if(!isFinite(arr[j]))continue;var x=X(j),y=Y(arr[j]);if(f){ctx.moveTo(x,y);f=false}else ctx.lineTo(x,y)}ctx.stroke()}
+  ctx.textAlign='left';
+  if(P.panel==='rsi'){
+    line(A.rsi,'#4aa3ff',1.6);ctx.fillStyle='#4aa3ff';ctx.fillText('RSI 14: '+A.rsi[n-1].toFixed(0)+'  (buy: back up through 30, sell: back down through 70)',padL+4,6);
+  }else{
+    line(A.stK,'#4aa3ff',1.5);line(A.stD,'#e0a100',1.2);ctx.fillStyle='#4aa3ff';ctx.fillText('Stoch %K '+A.stK[n-1].toFixed(0),padL+4,6);ctx.fillStyle='#e0a100';ctx.fillText('%D '+A.stD[n-1].toFixed(0),padL+80,6);
+  }
+  for(j=Math.max(st,61);j<n;j++){
+    var dir=0;
+    if(P.panel==='rsi'){if(A.rsi[j-1]<30&&A.rsi[j]>=30)dir=1;else if(A.rsi[j-1]>70&&A.rsi[j]<=70)dir=-1}
+    else{var b1=sbbAt(cs,j,A);if(b1&&sbbAt(cs,j-1,A)!==b1)dir=b1}
+    if(!dir)continue;
+    ctx.fillStyle=dir>0?colB:colS;ctx.beginPath();ctx.arc(X(j),Y(P.panel==='rsi'?A.rsi[j]:A.stK[j]),4,0,7);ctx.fill();
+  }
+}
 function drawChart(){
   var wrap=$('chartwrap'),cv=$('chart');
   if(!wrap.clientWidth||!S.sig)return;
@@ -1511,6 +1604,8 @@ function drawChart(){
   var active=sg.dir!=='WAIT',p=S.plan,lo=Infinity,hi=-Infinity,i;
   for(i=st;i<cs.length;i++){lo=Math.min(lo,S.ctype==='line'?cs[i].c:cs[i].l);hi=Math.max(hi,S.ctype==='line'?cs[i].c:cs[i].h)}
   if(active){lo=Math.min(lo,p.sl,p.tps[1].p);hi=Math.max(hi,p.sl,p.tps[1].p)}
+  var IND=S.showInd?indPlan(cs):null;
+  if(IND&&IND.r4){lo=Math.min(lo,IND.r4.lo);hi=Math.max(hi,IND.r4.hi)}
   var pad=(hi-lo)*0.06;lo-=pad;hi+=pad;
   function X(k){return padL+(k-st+0.5)*(plotW/N)}
   function Y(v){return top+(hi-v)/(hi-lo)*(priceH-top)}
@@ -1548,6 +1643,7 @@ function drawChart(){
   });
   ctx.setLineDash([]);
   if(S.showLiq&&sessOK())drawLiq(ctx,cs,candT(cs),st,X,Y,lo,hi,w,padR,css('--font-mono'));
+  if(IND)drawIndOverlay(ctx,IND,cs,st,X,Y,lo,hi,w,padR,padL,d);
   if(S.showZones&&sg.zones&&sg.zones.length){
     ctx.font='9px '+css('--font-mono');
     sg.zones.forEach(function(z){
@@ -1568,6 +1664,7 @@ function drawChart(){
     ctx.setLineDash([]);
   }
   G={st:st,N:N,padL:padL,plotW:plotW,top:top,priceH:priceH,hi:hi,lo:lo};
+  drawIndPanel(IND,cs,st,N,w,padL,padR);
   renderSess();
   var dcol=css('--warn');
   function drawShape(sh,draft){
@@ -2425,7 +2522,7 @@ function drawLiq(ctx,cs,T,st,X,Y,lo,hi,w,padR,font){
   });
   ctx.restore();
 }
-function saveView(){jset('chloe.view.v1',{zones:S.showZones,ctype:S.ctype,sess:S.showSess,liq:S.showLiq})}
+function saveView(){jset('chloe.view.v1',{zones:S.showZones,ctype:S.ctype,sess:S.showSess,liq:S.showLiq,ind:S.showInd})}
 function nowSession(){
   var now=Date.now(),d0=Math.floor(now/DAY)*DAY,defs=sessDefs(d0),act=defs.filter(function(x){return now>=x.a&&now<x.b}),dow=new Date(now).getUTCDay(),hr=new Date(now).getUTCHours();
   var closed=(dow===6)||(dow===0&&hr<21)||(dow===5&&hr>=21);
@@ -2509,6 +2606,7 @@ function wire4(){
   var a=$('shSess'),b=$('shLiq');
   if(a){a.checked=S.showSess;a.addEventListener('change',function(){S.showSess=a.checked;saveView();drawChart()})}
   if(b){b.checked=S.showLiq;b.addEventListener('change',function(){S.showLiq=b.checked;saveView();drawChart()})}
+  var ci=$('shInd');if(ci){ci.checked=S.showInd;ci.addEventListener('change',function(){S.showInd=ci.checked;saveView();drawChart()})}
   ['CPI','NFP'].forEach(function(k){$('scK'+k).addEventListener('click',function(){scKind=k;renderScen()})});
   ['above','inline','below'].forEach(function(k){$('scC'+k).addEventListener('click',function(){scCase=k;renderScen()})});
   renderScen();setInterval(function(){if($('sessBar')&&!$('p-signal').hidden)renderSess()},60000);
