@@ -327,7 +327,7 @@ function lots(sym, entry, dist) {
 async function biasFor(sym) { try { return (await getNews()).bias[sym].bias; } catch (e) { return 'neutral'; } }
 async function analyse(sym, tf, mode) {
   curDec = (INSTR[sym] || { dec: 5 }).dec;
-  const raw = await getCandles(sym, tf, 200), cs = dropForming(raw, tf), fr = INTEL.freshness(sym, tf, cs, Date.now(), raw.fellBack);
+  const raw = await getCandles(sym, tf, 300), cs = dropForming(raw, tf), fr = INTEL.freshness(sym, tf, cs, Date.now(), raw.fellBack);
   const sg = E.analyseAll(cs, tf, await biasFor(sym), mode || CFG.stratMode || 'auto', CFG.minScore, false, eventNear(12));
   if (fr.status === 'stale' && sg.dir !== 'WAIT') { sg.blockedStale = fr.reason; sg.dir = 'WAIT'; }
   return { sg, cs, fr };
@@ -456,7 +456,7 @@ async function resolvePaper() {
   for (const g of Object.keys(groups)) {
     const [sym, tf] = g.split('|');
     try {
-      const cs = dropForming(await getCandles(sym, tf, groups[g][0].kind === 'scalp' ? 400 : 200), tf);
+      const cs = dropForming(await getCandles(sym, tf, groups[g][0].kind === 'scalp' ? 400 : 300), tf);
       groups[g].forEach(t => { const was = t.status; resolveTrade(t, cs); if (was !== 'closed' && t.status === 'closed') { closed++; fresh.push(t); } });
     } catch (e) { errs.push(g + ': ' + e.message); }
   }
@@ -1027,7 +1027,7 @@ async function visionRead(b64, type, ours) {
 }
 async function chartCheck(sym, tf, img) {
   curDec = INSTR[sym].dec;
-  const raw = await getCandles(sym, tf, 200), cs = dropForming(raw, tf), fr = INTEL.freshness(sym, tf, cs, Date.now(), raw.fellBack);
+  const raw = await getCandles(sym, tf, 300), cs = dropForming(raw, tf), fr = INTEL.freshness(sym, tf, cs, Date.now(), raw.fellBack);
   if (fr.status === 'stale') return { text: 'CHLOE CHART CHECK: I will not judge ' + sym + ' ' + tf + ' right now. ' + frText(fr) + '.', read: null, fresh: fr, vision: null };
   const rd = CHART.read(E, cs, tf, await biasFor(sym), eventNear(12), CFG.minScore, INSTR[sym].dec), L = ['CHLOE CHART CHECK: ' + sym + ' ' + tf + ' (' + frText(fr) + ')'].concat(rd.lines);
   let vision = null, note = null;
@@ -1147,7 +1147,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/candles') {
       const sym = (q.get('symbol') || 'XAUUSD').toUpperCase(), tf = (q.get('tf') || 'H4').toUpperCase();
-      const cs = await getCandles(sym, tf, Math.min(500, +q.get('size') || 200)), fr = INTEL.freshness(sym, tf, dropForming(cs, tf), Date.now(), cs.fellBack);
+      const cs = await getCandles(sym, tf, Math.min(500, +q.get('size') || 300)), fr = INTEL.freshness(sym, tf, dropForming(cs, tf), Date.now(), cs.fellBack);
       return send(res, 200, { symbol: sym, tf, candles: cs, fetched_at: Math.floor(Date.now() / 1000), source: lastSource[sym] || 'td', fresh: fr });
     }
     if (p === '/api/signal') {

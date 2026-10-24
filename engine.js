@@ -407,7 +407,7 @@ function stopPlan(cs,i,up){
   return {en:en,sl:sl,dist:Math.abs(en-sl),atr:atr};
 }
 function rsiEval(cs,i,tf){
-  if(tf!=='H4'||i<210)return null;
+  if(tf!=='H4'||i<60)return null;
   var R=indArr(cs).rsi,up=null;
   if(R[i-1]<30&&R[i]>=30)up=true;else if(R[i-1]>70&&R[i]<=70)up=false;
   if(up==null)return null;
@@ -419,14 +419,14 @@ function rsiEval(cs,i,tf){
   return {dir:up?'BUY':'SELL',conds:conds,ok:P.dist>0,en:P.en,sl:P.sl,dist:P.dist};
 }
 function sbbAt(cs,j,A){
-  if(j<210)return 0;
+  if(j<60)return 0;
   var c=cs[j].c;
   if(c>A.bbu[j]&&A.stK[j]>A.stD[j]&&A.stK[j]<80)return 1;
   if(c<A.bbl[j]&&A.stK[j]<A.stD[j]&&A.stK[j]>20)return -1;
   return 0;
 }
 function sbbEval(cs,i,tf){
-  if(tf!=='H1'||i<211)return null;
+  if(tf!=='H1'||i<61)return null;
   var A=indArr(cs),b=sbbAt(cs,i,A);
   if(!b||sbbAt(cs,i-1,A)===b)return null; /* only the first candle of a run */
   var up=b>0,P=stopPlan(cs,i,up);
