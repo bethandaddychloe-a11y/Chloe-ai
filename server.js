@@ -24,9 +24,9 @@ const CFG = {
   ndx: +(ENV.NDX_RATIO || 41.1),
   btcSource: (ENV.BTC_SOURCE || 'td').toLowerCase(),
   sodHour: +(ENV.SOD_HOUR_UTC || 5),
-  stratMode: (ENV.STRATEGY || 'sweep').trim(),
-  watch: (ENV.WATCH == null ? 'XAUUSD:H4,XAUUSD:H1,XAGUSD:H4,USTEC:H4,USDJPY:H4,GBPUSD:H4,BTCUSD:H4' : ENV.WATCH).split(',').map(s => s.trim()).filter(Boolean),
-  scalpWatch: (ENV.SCALP_WATCH || 'XAUUSD:M5,XAGUSD:M5,USTEC:M5,USDJPY:M5,GBPUSD:M5,BTCUSD:M5,XAUUSD:M1,XAGUSD:M1,USTEC:M1').split(',').map(s => s.trim()).filter(Boolean),
+  stratMode: (ENV.STRATEGY || 'auto').trim(),
+  watch: (ENV.WATCH == null ? 'XAUUSD:H4,XAUUSD:H1,USDJPY:H4,USDJPY:H1,BTCUSD:H4,BTCUSD:H1,USTEC:H4,USTEC:H1' : ENV.WATCH).split(',').map(s => s.trim()).filter(Boolean),
+  scalpWatch: (ENV.SCALP_WATCH || 'XAUUSD:M5,USTEC:M5,USDJPY:M5,BTCUSD:M5,XAUUSD:M1,USTEC:M1').split(',').map(s => s.trim()).filter(Boolean),
   minConf: +(ENV.MIN_CONFIDENCE || 55), scalpMinConf: +(ENV.SCALP_MIN_CONFIDENCE || 50),
   scalpCooldownMin: +(ENV.SCALP_COOLDOWN_MIN || 0), scalpMaxPerDay: +(ENV.SCALP_MAX_PER_DAY || 500), // no wait between scalps and no small daily cap: the Scalper plan's own limits decide
   balance: +(ENV.BALANCE || 1000), riskPct: +(ENV.RISK_PCT || 1),
@@ -34,17 +34,17 @@ const CFG = {
   llmKey: ENV.ANTHROPIC_API_KEY || '', llmModel: ENV.LLM_MODEL || 'claude-haiku-5-5', llmDaily: +(ENV.LLM_DAILY_LIMIT || 20),
   tdPerMin: +(ENV.TD_PER_MIN || 8), creditLimit: +(ENV.TD_DAILY_LIMIT || 800),
   finnhubKey: ENV.FINNHUB_API_KEY || '', avKey: ENV.ALPHAVANTAGE_API_KEY || '', fredKey: ENV.FRED_API_KEY || '', avMaxDay: +(ENV.AV_MAX_PER_DAY || 12),
-  alertPairs: (ENV.ALERT_PAIRS == null ? 'XAUUSD,BTCUSD' : ENV.ALERT_PAIRS).split(',').map(x => x.trim().toUpperCase()).filter(Boolean), alertStrats: (ENV.ALERT_STRATS == null ? 'CRT (range sweep),EMA pullback' : ENV.ALERT_STRATS).split(',').map(x => x.trim()).filter(Boolean), // trial alerts only for these; everything else is recorded quietly until it is proven
+  alertPairs: (ENV.ALERT_PAIRS == null ? 'XAUUSD,USDJPY,BTCUSD,USTEC' : ENV.ALERT_PAIRS).split(',').map(x => x.trim().toUpperCase()).filter(Boolean), alertStrats: (ENV.ALERT_STRATS == null ? 'EMA pullback,RSI reversion,Stochastic + Bollinger breakout,Breakout and retest,CRT (range sweep)' : ENV.ALERT_STRATS).split(',').map(x => x.trim()).filter(Boolean), // trial alerts only for these; everything else is recorded quietly until it is proven
   newsBefore: +(ENV.NEWS_BLACKOUT_BEFORE || 30), newsAfter: +(ENV.NEWS_BLACKOUT_AFTER || 15), dailySignal: ENV.DAILY_SIGNAL === '1',
   tdBudget: +(ENV.TD_BUDGET || 780), tdReserve: +(ENV.TD_RESERVE || 220), // hard stop on Twelve Data calls per day; the last part is kept for 5 and 1 minute scalp scans
-  tdOnly: (ENV.TD_ONLY == null ? 'XAUUSD,XAGUSD,USTEC' : ENV.TD_ONLY).split(',').map(x => x.trim().toUpperCase()).filter(Boolean),
+  tdOnly: (ENV.TD_ONLY == null ? 'XAUUSD,USTEC' : ENV.TD_ONLY).split(',').map(x => x.trim().toUpperCase()).filter(Boolean),
   fastOrder: (ENV.FAST_ORDER || 'yahoo,td').split(',').map(x => x.trim().toLowerCase()).filter(x => x === 'td' || x === 'yahoo'),
   dataOrder: (ENV.DATA_ORDER || 'td,yahoo').split(',').map(x => x.trim().toLowerCase()).filter(x => x === 'td' || x === 'yahoo'),
   calUrl: ENV.CALENDAR_URL || 'https://nfs.faireconomy.media/ff_calendar_thisweek.json',
   feeds: (ENV.NEWS_FEEDS || ['https://www.fxstreet.com/rss/news', 'https://www.forexlive.com/feed/news', 'https://www.investing.com/rss/news_1.rss', 'https://www.investing.com/rss/news_25.rss', 'https://feeds.bbci.co.uk/news/business/rss.xml', 'https://feeds.bbci.co.uk/news/world/rss.xml', 'https://www.aljazeera.com/xml/rss/all.xml', 'https://www.cnbc.com/id/10000664/device/rss/rss.html'].join(',')).split(',').map(s => s.trim()).filter(Boolean),
   events: (ENV.EVENTS || 'US CPI|2026-10-14T12:30:00Z,US NFP|2026-11-06T13:30:00Z').split(',').map(s => { const p = s.split('|'); return { name: p[0], t: Date.parse(p[1]) }; }).filter(e => isFinite(e.t)),
 };
-const PAIRS = (ENV.PAIRS || 'XAUUSD,XAGUSD,USTEC,USDJPY,GBPUSD,BTCUSD').split(',').map(x => x.trim().toUpperCase()).filter(x => /^[A-Z]{6}$|^USTEC$/.test(x)); // the scalp focus: gold, silver, Nasdaq
+const PAIRS = (ENV.PAIRS || 'XAUUSD,USDJPY,BTCUSD,USTEC').split(',').map(x => x.trim().toUpperCase()).filter(x => /^[A-Z]{6}$|^USTEC$/.test(x)); // the four pairs Chloe trades: gold, USDJPY, Bitcoin, Nasdaq
 const SCALP = { trailStartR: +(ENV.TRAIL_START_R || 0.8), trailDistR: +(ENV.TRAIL_DIST_R || 0.6), lockR: +(ENV.TRAIL_LOCK_R || 0.1), maxM1Age: 3 };
 const INSTR = {
   XAUUSD: { dec: 2, pip: 0.1, pv: () => 10 }, BTCUSD: { dec: 2, pip: 1, pv: () => 1 },

@@ -227,16 +227,14 @@ function ctxAt(cs,i,tf,bias){
   return {pv:pv,tr:trendOf(pv),atr:atrAt(cs,i,14)||(c.h-c.l),lv:levelsOf(pv,c.c),htf:htfTrend(cs,i,tf),pt:patterns(cs,i),c:c,bias:bias,st:smcState(cs,i)};
 }
 var STRATS=[
+  {id:'ema',name:'EMA pullback',blurb:'Swing (1 and 4 hour). 20, 50 and 200 averages stacked in one direction, price dips to the 20 average and closes back out in the trend direction.'},
+  {id:'rsi',name:'RSI reversion',blurb:'Swing (4 hour). RSI(14) drops under 30 or rises over 70, then crosses back. Buy the cross back up through 30, sell the cross back down through 70. Stop 1.5 ATR, targets 1R, 2R and 3R. Positive on gold, USDJPY, Bitcoin and Nasdaq in the tests.'},
+  {id:'sbb',name:'Stochastic + Bollinger breakout',blurb:'Swing (1 hour). A candle closes outside the Bollinger band (20, 2) while Stochastic (14, 3, 3) agrees and is not over 80 or under 20. First candle of the run only. Stop 1.5 ATR, targets 1R, 2R and 3R. Positive on gold, USDJPY, Bitcoin and Nasdaq in the tests.'},
   {id:'pa',name:'Price action',blurb:'Market structure, candle patterns, key levels and room to the next level. Seven plain checks.'},
   {id:'smc',name:'Smart money (SMC)',blurb:'Break of structure or change of character, then price returns to an unmitigated order block or fair value gap and reacts.'},
-  {id:'sr',name:'Support and resistance',blurb:'A rejection candle (pin bar or engulfing) at a proven swing level, trading the bounce.'},
-  {id:'trend',name:'Trend pullback',blurb:'In a clear trend, buy or sell the 30 to 75 percent pullback once price turns back in trend direction.'},
   {id:'break',name:'Breakout and retest',blurb:'Price closes through a swing level, comes back to retest it, and holds.'},
-  {id:'sweep',name:'Liquidity sweep',blurb:'Price spikes through a swing high or low to take stops, closes back inside, and a confirming candle follows.'},
-  {id:'line',name:'Line-chart structure',blurb:'Structure read from closing prices only (line chart): trend in closes plus a fresh break of the last closing swing.'},
   {id:'crt',name:'CRT (range sweep)',blurb:'5 minute entries only. The last 4 hour candle is the range; price sweeps its high or low, closes back inside, a displacement candle follows, and the target is the middle of the range.'},
-  {id:'mom',name:'Momentum scalp',blurb:'1 and 5 minute entries. Enters on every closed candle that goes with the momentum (20 average over the 50 and the candle closing the same way). Stop behind the last 3 candles, targets 1R, 1.5R and 2.2R with a trailing stop.'},
-  {id:'ema',name:'EMA pullback',blurb:'Swing (1 and 4 hour). 20, 50 and 200 averages stacked in one direction, price dips to the 20 average and closes back out in the trend direction.'}
+  {id:'mom',name:'Momentum scalp',blurb:'1 and 5 minute entries. Enters on every closed candle that goes with the momentum (20 average over the 50 and the candle closing the same way). Stop behind the last 3 candles, targets 1R, 1.5R and 2.2R with a trailing stop.'}
 ];
 function stratName(id){for(var k=0;k<STRATS.length;k++)if(STRATS[k].id===id)return STRATS[k].name;return id}
 function zonesFor(cs,i,x){
@@ -385,19 +383,74 @@ function momEval(cs,i,tf){
     ['Stop is '+(dist/atr).toFixed(1)+' ATR',dist>0]];
   return {dir:up?'BUY':'SELL',conds:conds,ok:conds.every(function(q){return q[1]}),en:en,sl:sl,dist:dist};
 }
+/* RSI reversion (4 hour) and Stochastic + Bollinger breakout (1 hour): the two strategies that were positive on gold, USDJPY, Bitcoin and Nasdaq in the 2025 and 2026 tests */
+function indArr(cs){
+  var c=cs._ind;if(c&&c.n===cs.length)return c.a;
+  var n=cs.length,g=[0],s=[0],j,i,k;
+  for(j=1;j<n;j++){var d=cs[j].c-cs[j-1].c;g.push(d>0?d:0);s.push(d<0?-d:0)}
+  var rsi=new Array(n).fill(50),ag=0,al=0;
+  for(j=0;j<n;j++){
+    if(j<14){ag+=g[j];al+=s[j];if(j===13){ag/=14;al/=14}}
+    else{ag=(ag*13+g[j])/14;al=(al*13+s[j])/14}
+    if(j>=13)rsi[j]=al===0?100:100-100/(1+ag/al);
+  }
+  var bbu=new Array(n).fill(NaN),bbl=new Array(n).fill(NaN),stK=new Array(n).fill(50),stD=new Array(n).fill(50);
+  for(j=19;j<n;j++){var m=0;for(k=j-19;k<=j;k++)m+=cs[k].c;m/=20;var sd=0;for(k=j-19;k<=j;k++)sd+=(cs[k].c-m)*(cs[k].c-m);sd=Math.sqrt(sd/20);bbu[j]=m+2*sd;bbl[j]=m-2*sd}
+  for(j=14;j<n;j++){var hi=-1e18,lo=1e18;for(k=j-13;k<=j;k++){if(cs[k].h>hi)hi=cs[k].h;if(cs[k].l<lo)lo=cs[k].l}stK[j]=hi===lo?50:100*(cs[j].c-lo)/(hi-lo)}
+  for(j=16;j<n;j++)stD[j]=(stK[j]+stK[j-1]+stK[j-2])/3;
+  var a={rsi:rsi,bbu:bbu,bbl:bbl,stK:stK,stD:stD};
+  try{Object.defineProperty(cs,'_ind',{value:{n:n,a:a},writable:true,configurable:true,enumerable:false})}catch(e){}
+  return a;
+}
+function stopPlan(cs,i,up){
+  var c=cs[i],atr=atrAt(cs,i,14)||(c.h-c.l),en=c.c,sl=up?en-1.5*atr:en+1.5*atr;
+  return {en:en,sl:sl,dist:Math.abs(en-sl),atr:atr};
+}
+function rsiEval(cs,i,tf){
+  if(tf!=='H4'||i<210)return null;
+  var R=indArr(cs).rsi,up=null;
+  if(R[i-1]<30&&R[i]>=30)up=true;else if(R[i-1]>70&&R[i]<=70)up=false;
+  if(up==null)return null;
+  var P=stopPlan(cs,i,up);
+  var conds=[
+    ['RSI(14) was '+(up?'below 30 (oversold)':'above 70 (overbought)')+' on the candle before ('+R[i-1].toFixed(0)+')',true],
+    ['RSI(14) closed back '+(up?'above 30':'below 70')+' ('+R[i].toFixed(0)+'), so the push is fading',true],
+    ['Stop is 1.5 ATR away',P.dist>0]];
+  return {dir:up?'BUY':'SELL',conds:conds,ok:P.dist>0,en:P.en,sl:P.sl,dist:P.dist};
+}
+function sbbAt(cs,j,A){
+  if(j<210)return 0;
+  var c=cs[j].c;
+  if(c>A.bbu[j]&&A.stK[j]>A.stD[j]&&A.stK[j]<80)return 1;
+  if(c<A.bbl[j]&&A.stK[j]<A.stD[j]&&A.stK[j]>20)return -1;
+  return 0;
+}
+function sbbEval(cs,i,tf){
+  if(tf!=='H1'||i<211)return null;
+  var A=indArr(cs),b=sbbAt(cs,i,A);
+  if(!b||sbbAt(cs,i-1,A)===b)return null; /* only the first candle of a run */
+  var up=b>0,P=stopPlan(cs,i,up);
+  var conds=[
+    ['Candle closed '+(up?'above the upper':'below the lower')+' Bollinger band (20, 2)',true],
+    ['Stochastic %K is '+(up?'above':'below')+' %D, so momentum agrees',true],
+    ['Stochastic %K is '+A.stK[i].toFixed(0)+' ('+(up?'under 80':'over 20')+'), so the move is not exhausted',true],
+    ['First candle of the breakout, not a repeat',true]];
+  return {dir:up?'BUY':'SELL',conds:conds,ok:P.dist>0,en:P.en,sl:P.sl,dist:P.dist};
+}
 function runCustom(id,cs,i,tf){
-  var e=id==='crt'?crtEval(cs,i,tf):(id==='mom'?momEval(cs,i,tf):emaEval(cs,i,tf)),name=stratName(id);
-  if(!e)return {id:id,name:name,dir:'WAIT',lean:'WAIT',q:0,checks:[[id==='mom'?'No fresh momentum breakout on the 1 or 5 minute chart right now':id==='crt'?'No sweep of the last 4 hour range with a displacement candle right now (needs the 5 minute chart)':'No pullback to the 20 average inside a clean trend right now (needs the 1 or 4 hour chart)',false]],plan:null,zones:[],score:0};
+  var e=id==='crt'?crtEval(cs,i,tf):(id==='mom'?momEval(cs,i,tf):(id==='rsi'?rsiEval(cs,i,tf):(id==='sbb'?sbbEval(cs,i,tf):emaEval(cs,i,tf)))),name=stratName(id);
+  if(!e)return {id:id,name:name,dir:'WAIT',lean:'WAIT',q:0,checks:[[id==='rsi'?'RSI(14) has not just crossed back from below 30 or above 70 on the 4 hour chart (needs the 4 hour chart)':id==='sbb'?'No fresh close outside the Bollinger band with Stochastic agreeing on the 1 hour chart (needs the 1 hour chart)':id==='mom'?'No fresh momentum breakout on the 1 or 5 minute chart right now':id==='crt'?'No sweep of the last 4 hour range with a displacement candle right now (needs the 5 minute chart)':'No pullback to the 20 average inside a clean trend right now (needs the 1 or 4 hour chart)',false]],plan:null,zones:[],score:0};
   if(!e.ok)return {id:id,name:name,dir:'WAIT',lean:e.dir,q:0.3,checks:e.conds,plan:null,zones:[],score:2};
   var sgn=e.dir==='BUY'?1:-1,lv=levelsOf(pivots(cs,i),e.en),tps;
   if(id==='crt')tps=[{p:e.mid,kind:'MID'},{p:e.mid,kind:'MID'},{p:e.mid,kind:'MID'}];
   else if(id==='mom')tps=[1,1.5,2.2].map(function(m){return {p:e.en+sgn*m*e.dist,kind:'R'}});
+  else if(id==='rsi'||id==='sbb')tps=[1,2,3].map(function(m){return {p:e.en+sgn*m*e.dist,kind:'R'}});
   else tps=[1.5,2,3].map(function(m){return {p:e.en+sgn*m*e.dist,kind:'R'}});
   var plan={dir:e.dir,entry:e.en,sl:e.sl,dist:e.dist,tps:tps,nearOpp:(sgn>0?lv.res:lv.sup)[0]!=null?(sgn>0?lv.res:lv.sup)[0]:null,sup:lv.sup[0],res:lv.res[0]};
   return {id:id,name:name,dir:e.dir,lean:e.dir,q:0.8,checks:e.conds,plan:plan,zones:[],score:6};
 }
 function runStrat(id,cs,i,tf,bias,minScore,x,paBase){
-  if(id==='crt'||id==='ema'||id==='mom')return runCustom(id,cs,i,tf);
+  if(id==='crt'||id==='ema'||id==='mom'||id==='rsi'||id==='sbb')return runCustom(id,cs,i,tf);
   x=x||ctxAt(cs,i,tf,bias);
   if(id==='pa'){return wrapPA(paBase||decide(scoreAt(cs,i,bias,tf),minScore,false),i)}
   var best=null;
@@ -482,7 +535,7 @@ function analyseAll(cs,tf,bias,mode,minScore,block,near){
 }
 /* ---- scalping profile: same rules, lower timeframe, tighter stop, fixed small targets, extra filters ---- */
 var SCALP_DEF={tf:'M5',slAtr:1.5,rr:[1,1.5,2.2],target:1,minConfirm:2,minScore:5,session:true,cost:0.1};
-var SCALP_ORDER=['crt','mom','smc','sweep','sr','trend','break','line','pa'];
+var SCALP_ORDER=['crt','mom','smc','break','pa'];
 function inSession(sym,ms){
   if(sym==='BTCUSD')return true;
   var d=new Date(ms||Date.now()),h=d.getUTCHours(),w=d.getUTCDay();

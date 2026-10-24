@@ -13,7 +13,7 @@ const PLANS = {
   goal: { hidden: true, id: 'goal', name: 'Goal plan', desc: 'You set a start, a target and a number of trades. Chloe works out the risk per trade needed to get there and trades it, rolling all profit into the next trade. Demo only.', risk: 10, maxOpen: 1, maxDay: 3, dayLoss: 60, weekLoss: 90, ddStop: 85, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55, demoOnly: true, goal: true },
   custom: { id: 'custom', name: 'Custom', desc: 'Your own numbers.', risk: 0.5, maxOpen: 2, maxDay: 3, dayLoss: 2, weekLoss: 4, ddStop: 8, tp: 'tp2', kinds: ['swing'], minConf: 60 },
 };
-const ALL_PAIRS = ['XAUUSD', 'XAGUSD', 'BTCUSD', 'USDJPY', 'GBPUSD', 'USTEC'];
+const ALL_PAIRS = ['XAUUSD', 'USDJPY', 'BTCUSD', 'USTEC'];
 const num = (x, lo, hi, d) => { x = parseFloat(x); return isFinite(x) ? Math.min(hi, Math.max(lo, x)) : d; };
 
 module.exports = function makeAuto(D) {
@@ -25,12 +25,12 @@ module.exports = function makeAuto(D) {
 
   function init() {
     const a = state.auto = state.auto || {};
-    a.cfg = Object.assign({ enabled: false, mode: 'demo', plan: 'steady', custom: Object.assign({}, PLANS.custom), pairs: ['XAUUSD', 'XAGUSD', 'USTEC'], goal: { start: 10, target: 2000, trades: 15, tp: 'tp2', stopOnLoss: true, active: false, run: 0, startEq: 0, result: null }, approval: 'ask', scale: { on: true, addAtR: 1, maxAdds: 2, addFrac: 0.5 }, killed: false, killReason: '', closeOnKill: true, liveAckAt: 0 }, a.cfg || {});
+    a.cfg = Object.assign({ enabled: false, mode: 'demo', plan: 'steady', custom: Object.assign({}, PLANS.custom), pairs: ['XAUUSD', 'USDJPY', 'BTCUSD', 'USTEC'], goal: { start: 10, target: 2000, trades: 15, tp: 'tp2', stopOnLoss: true, active: false, run: 0, startEq: 0, result: null }, approval: 'ask', scale: { on: true, addAtR: 1, maxAdds: 2, addFrac: 0.5 }, killed: false, killReason: '', closeOnKill: true, liveAckAt: 0 }, a.cfg || {});
     a.cfg.goal = Object.assign({ start: 10, target: 2000, trades: 15, tp: 'tp2', stopOnLoss: true, active: false, run: 0, startEq: 0, result: null }, a.cfg.goal || {}); if (a.cfg.plan === 'ladder') a.cfg.plan = 'goal';
-    if (!a.cfg.pairsV) { a.cfg.pairsV = 2; ['XAGUSD', 'USTEC', 'XAUUSD'].forEach(s => { if (!a.cfg.pairs.includes(s)) a.cfg.pairs.push(s); }); } // silver joined the list
+    if (!a.cfg.pairsV) { a.cfg.pairsV = 2; ['USTEC', 'XAUUSD'].forEach(s => { if (!a.cfg.pairs.includes(s)) a.cfg.pairs.push(s); }); } // silver joined the list
     if (PLANS[a.cfg.plan] && PLANS[a.cfg.plan].hidden) a.cfg.plan = 'scalper';
     a.cfg.scale = Object.assign({ on: true, addAtR: 1, maxAdds: 2, addFrac: 0.5 }, a.cfg.scale || {}); a.cfg.approval = a.cfg.approval === 'auto' ? 'auto' : 'ask';
-    a.cfg.plan = 'scalper'; a.cfg.approval = 'auto'; a.cfg.scale.on = false; a.cfg.pairs = ['XAUUSD', 'XAGUSD', 'USTEC', 'USDJPY', 'GBPUSD', 'BTCUSD']; // one fixed mode: nothing to configure
+    a.cfg.plan = 'scalper'; a.cfg.approval = 'auto'; a.cfg.scale.on = false; a.cfg.pairs = ['XAUUSD', 'USDJPY', 'BTCUSD', 'USTEC']; // one fixed mode: nothing to configure
     a.trades = a.trades || []; a.seq = a.seq || 0; a.hb = a.hb || null; a.acct = a.acct || { peak: 0, day: null, week: null }; a.haltDay = a.haltDay || null; a.closeAllPending = !!a.closeAllPending;
     return a;
   }
