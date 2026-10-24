@@ -482,7 +482,7 @@ details[open] summary{margin-bottom:10px}
         <div id="auPendBox" style="display:grid;gap:10px"></div>
         <p class="note" id="auPendMsg" style="margin-bottom:0"></p>
       </div>
-      <div class="card">
+      <div class="card" style="display:none">
         <h2>Choose a trading plan</h2>
         <div id="auPlans"></div>
         <div id="auCustom" hidden style="margin-top:10px">
@@ -509,7 +509,7 @@ details[open] summary{margin-bottom:10px}
         <p class="note">Nasdaq is off by default: its prices here come from the QQQ fund, so distances can differ from your broker.</p>
         <div class="btns" style="margin-top:6px"><button class="btn primary" id="btnAuSave">Save plan and pairs</button></div>
       </div>
-      <div class="card">
+      <div class="card" style="display:none">
         <h2>How trades are entered</h2>
         <div class="row"><label>When Chloe finds a trade<select id="apMode"><option value="ask">Ask me first (lock it in)</option><option value="auto">Trade without asking</option></select></label></div>
         <p class="note" id="auHook"></p>
@@ -520,7 +520,7 @@ details[open] summary{margin-bottom:10px}
         <p class="note">Each further add needs another R of profit (1R, then 2R). The Expert Advisor moves a trade's stop to break-even at 1R, which is what makes an add possible.</p>
         <div class="btns"><button class="btn primary" id="btnApSave">Save</button></div>
       </div>
-      <div class="card">
+      <div class="card" style="display:none">
         <h2>Demo or real account</h2>
         <div class="row"><label>Mode<select id="auMode"><option value="demo">Demo (practice money)</option><option value="live">Live (real money)</option></select></label></div>
         <div id="auLive" hidden style="margin-top:10px">
