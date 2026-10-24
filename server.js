@@ -2,7 +2,7 @@
 /* Chloe AI server. No dependencies. Needs Node 18 or newer.
    Serves the dashboard, pulls candles (Twelve Data, plus Binance for Bitcoin), reads headlines,
    runs the strategy engine, and sends Telegram alerts. It never places trades itself: the optional auto module queues orders for the MT5 Expert Advisor. */
-const http = require('http'), fs = require('fs'), path = require('path'), os = require('os');
+const http = require('http'), fs = require('fs'), path = require('path'), os = require('os'), zlib = require('zlib');
 let curDec = 2;
 global.fmt = function (x) { return Number(x).toFixed(curDec); };
 const E = require('./engine.js');
@@ -67,17 +67,20 @@ async function upstash(cmd) {
 }
 async function loadState() {
   try { Object.assign(state, JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))); loadedFrom = 'temp file'; } catch (e) {}
-  if (UP.url && UP.token) { try { const v = await upstash(['GET', 'chloe_state']); if (v) { Object.assign(state, JSON.parse(v)); loadedFrom = 'Upstash'; } } catch (e) { storeErr = e.message; } }
+  if (UP.url && UP.token) { try { const v = await upstash(['GET', 'chloe_state']); if (v) { Object.assign(state, JSON.parse(String(v).startsWith('gz:') ? zlib.gunzipSync(Buffer.from(String(v).slice(3), 'base64')).toString() : v)); loadedFrom = 'Upstash'; } } catch (e) { storeErr = e.message; } }
   state.paper = state.paper || { trades: [], keys: {}, seq: 0 };
   state.forecasts = state.forecasts || {};
   if (state.cred && state.cred.day === today()) { credits.day = state.cred.day; credits.n = Math.max(credits.n, +state.cred.n || 0); }
   state.alerts = state.alerts || {}; state.counts = state.counts || {}; state.valid = state.valid || {}; state.rules = state.rules || {}; state.paused = !!state.paused; state.aplus = !!state.aplus; state.trial = state.trial !== false; state.ready = state.ready || {}; state.my = state.my || { seq: 0, list: [] }; state.llmUse = state.llmUse || {};
   AUTO.init();
 }
-async function saveState() {
+let lastSaveAt = 0, saveTimer = null;
+async function saveState(mode) { // mode 'lazy' (the EA poll, every few seconds) saves at most once every 30 s; everything else saves at once. Upstash gets a compressed copy so it uses about a fifth of the bandwidth
+  if (mode === 'lazy' && Date.now() - lastSaveAt < 30000) { if (!saveTimer) saveTimer = setTimeout(() => { saveTimer = null; saveState(); }, 30050 - (Date.now() - lastSaveAt)); return; }
+  lastSaveAt = Date.now();
   const txt = JSON.stringify(state);
   try { fs.writeFileSync(STATE_FILE, txt); } catch (e) {}
-  if (UP.url && UP.token) { try { await upstash(['SET', 'chloe_state', txt]); storeErr = null; } catch (e) { storeErr = e.message; } }
+  if (UP.url && UP.token) { try { await upstash(['SET', 'chloe_state', 'gz:' + zlib.gzipSync(txt).toString('base64')]); storeErr = null; } catch (e) { storeErr = e.message; } }
 }
 const AUTO = require('./auto.js')({ CFG, ask: (t, id) => telegramAsk(t, id), fmtPrice: (sym, x) => Number(x).toFixed(INSTR[sym] ? INSTR[sym].dec : 2), tgHook: () => tgHook, events: () => allEvents(), state, saveState, telegram: m => telegram(m), statsOf: rs => statsOf(rs), paused: () => state.paused, trail: { startR: SCALP.trailStartR, distR: SCALP.trailDistR, lockR: SCALP.lockR }, ENV });
 const ready = loadState().then(() => runStorageTest()).catch(() => {});
@@ -1124,14 +1127,20 @@ async function forecasts() {
   return { official: FEEDS.describe(fred, avCache ? avCache.p.sentiment : null), official_status: extraRows().fred.status, events: list, headlines: lastTitles.length, record: { scored: rec.length, hits, items: rec.slice(-8) }, saved: Object.values(state.forecasts).filter(f => !f.outcome && f.t < now).map(f => ({ id: f.id, name: f.name, cons: f.cons })) };
 }
 /* ---------- http ---------- */
-const send = (res, code, obj) => { const b = JSON.stringify(obj); res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(b); };
+const wantsGzip = res => /gzip/.test((res.req && res.req.headers['accept-encoding']) || '');
+const send = (res, code, obj) => { const b = JSON.stringify(obj), h = { 'content-type': 'application/json', 'cache-control': 'no-store' }; if (b.length > 1024 && wantsGzip(res)) { h['content-encoding'] = 'gzip'; res.writeHead(code, h); return res.end(zlib.gzipSync(b)); } res.writeHead(code, h); res.end(b); }; // gzip cuts the data sent out (and Render's free bandwidth) to about a fifth
+let idxGz = null;
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x'), p = u.pathname, q = u.searchParams;
   try {
     if (p.startsWith('/api') || p === '/run') await ready;
     const ASSET = { '/icon.svg': 'image/svg+xml', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png', '/maskable-512.png': 'image/png', '/apple-touch-icon.png': 'image/png', '/manifest.webmanifest': 'application/manifest+json', '/sw.js': 'application/javascript' };
     if (ASSET[p]) { const fp = path.join(STATIC_DIR, p.slice(1)); if (!fs.existsSync(fp)) { res.writeHead(404, { 'content-type': 'application/json' }); return res.end('{"error":"file missing on server: ' + p.slice(1) + '"}'); } res.writeHead(200, { 'content-type': ASSET[p], 'cache-control': p === '/sw.js' || p === '/manifest.webmanifest' || /^\/(icon|maskable|apple)/.test(p) ? 'no-cache' : 'public, max-age=86400' }); return res.end(fs.readFileSync(fp)); }
-    if (p === '/' || p === '/index.html') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(fs.readFileSync(path.join(STATIC_DIR, 'index.html'))); }
+    if (p === '/' || p === '/index.html') {
+      const raw = fs.readFileSync(path.join(STATIC_DIR, 'index.html'));
+      if (wantsGzip(res)) { if (!idxGz || idxGz.n !== raw.length) idxGz = { n: raw.length, z: zlib.gzipSync(raw) }; res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-encoding': 'gzip' }); return res.end(idxGz.z); }
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(raw);
+    }
     if (p === '/health') {
       const n = newsCache ? newsCache.v : { feeds_ok: 0, feeds_total: CFG.feeds.length };
       return send(res, 200, { ok: true, broker_spread: state.spread || {}, fills: (state.fills || []).length, twelve_data_key: !!CFG.tdKey, telegram: !!(CFG.tgToken && CFG.tgChat), metaapi: !!(CFG.maToken && CFG.maAcc), btc_source: lastSource.BTCUSD || CFG.btcSource, credits_today: credits.day === today() ? credits.n : 0, credit_budget: CFG.tdBudget, credit_limit: CFG.creditLimit, sod_hour_utc: CFG.sodHour, last_sod: state.sod ? state.sod.date + ': ' + state.sod.txt : null, feeds_ok: n.feeds_ok, feeds_total: n.feeds_total, feeds: n.feeds || {}, data_order: CFG.dataOrder, fast_order: CFG.fastOrder, trial_alerts: state.trial !== false, proven_track: readiness().line, ready: state.ready, td_only: CFG.tdOnly, extra_sources: extraRows(), last_sources: lastSource, source_errors: srcErr, calendar: calStatus, tg_buttons: tgHook, watch: CFG.watch, scalp_watch: CFG.scalpWatch, strategy: CFG.stratMode, storage: UP.url ? 'upstash' : 'temp file (may reset on restart)', storage_error: storeErr, data_age: Object.fromEntries(CFG.watch.concat(CFG.scalpWatch).map(it => { const [sy, tf] = it.split(':'); return [it, ageOf(sy, (tf || 'H4').toUpperCase())]; })), storage_test: storageTest, paused: !!state.paused, uptime_min: Math.round((Date.now() - bootAt) / 60000), loaded_from: loadedFrom, validated: Object.keys(state.valid), last_report: state.lastReport || null, llm: !!CFG.llmKey, paper_open: state.paper.trades.filter(t => t.status !== 'closed').length, paper_closed: state.paper.trades.filter(t => t.status === 'closed').length });

@@ -193,7 +193,7 @@ module.exports = function makeAuto(D) {
     if (a.closeAllPending) out.push('CLOSEALL');
     if (c.enabled && !c.killed && a.haltDay !== day() && !a.closeAllPending) for (const t of a.trades) if (t.status === 'queued' && now - t.at <= t.expireSec * 1000 && t.mode === c.mode) { t.status = 'sent'; t.sentAt = now; out.push(['OPEN', t.id, t.sym, t.dir, t.slDist, t.tpDist, t.riskPct, t.expireSec, t.isAdd ? 1 : 0, t.entry || 0, t.trail ? t.trail.startR : 0, t.trail ? t.trail.distR : 0, t.trail ? t.trail.lockR : 0].join('|')); }
     if (a.closeAllPending && !(a.hb.positions || []).length) a.closeAllPending = false;
-    await saveState();
+    await saveState('lazy');
     for (const m of msgs) telegram(m);
     return { code: 200, text: out.join('\n') };
   }
