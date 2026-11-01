@@ -83,6 +83,7 @@ async function saveState(mode) { // mode 'lazy' (the EA poll, every few seconds)
   try { fs.writeFileSync(STATE_FILE, txt); } catch (e) {}
   if (UP.url && UP.token) { try { await upstash(['SET', 'chloe_state', 'gz:' + zlib.gzipSync(txt).toString('base64')]); storeErr = null; } catch (e) { storeErr = e.message; } }
 }
+const OUTLOOK = require('./outlook.js');
 const AUTO = require('./auto.js')({ CFG, ask: (t, id) => telegramAsk(t, id), fmtPrice: (sym, x) => Number(x).toFixed(INSTR[sym] ? INSTR[sym].dec : 2), tgHook: () => tgHook, events: () => allEvents(), state, saveState, telegram: m => telegram(m), statsOf: rs => statsOf(rs), paused: () => state.paused, trail: { startR: SCALP.trailStartR, distR: SCALP.trailDistR, lockR: SCALP.lockR }, ENV });
 const ready = loadState().then(() => runStorageTest()).catch(() => {});
 const today = () => new Date().toISOString().slice(0, 10);
@@ -325,7 +326,7 @@ function lots(sym, entry, dist) {
   const I = INSTR[sym], risk = CFG.balance * CFG.riskPct / 100, raw = risk / ((dist / I.pip) * I.pv(entry));
   return Math.max(0.01, Math.floor(raw * 100 + 1e-9) / 100);
 }
-async function biasFor(sym) { try { return (await getNews()).bias[sym].bias; } catch (e) { return 'neutral'; } }
+async function biasFor(sym) { const ob = state.outlookBias; if (ob && Date.now() - ob.at < 12 * 3600000 && ob.b && ob.b[sym] && ob.b[sym] !== 'neutral') return ob.b[sym]; /* the lean you applied from the Outlook card wins for 12 hours */ try { return (await getNews()).bias[sym].bias; } catch (e) { return 'neutral'; } }
 async function analyse(sym, tf, mode) {
   curDec = (INSTR[sym] || { dec: 5 }).dec;
   const raw = await getCandles(sym, tf, 300), cs = dropForming(raw, tf), fr = INTEL.freshness(sym, tf, cs, Date.now(), raw.fellBack);
@@ -1122,11 +1123,34 @@ async function cmdAlert(q) {
   const r = await addPriceAlert(q.sym, nums[0], '');
   return r.error ? r.error : 'Alert set. I will message you here when ' + fmtAlert(r.alert).slice(String(r.alert.id).length + 2) + '. Checked every few seconds while Chloe is awake and on every cron run, so keep the cron-job.org ping running.';
 }
+
+/* ---------- outlook: upcoming events, what is expected and why, and a scorer for pasted news ---------- */
+function outlookData(text) {
+  const an = OUTLOOK.analyzeText(text), evs = allEvents().map(e => ({ name: e.name, t: e.t, forecast: e.forecast, previous: e.previous }));
+  const events = OUTLOOK.build(evs, { usd: an.usd, boj: an.boj, now: Date.now() });
+  const signals = {}; OUTLOOK.PAIRS.forEach(p => { signals[p] = OUTLOOK.signalLine(p, an.pairs[p]); });
+  return { events, paste: an, signals, applied: state.outlookBias && Date.now() - state.outlookBias.at < 12 * 3600000 ? state.outlookBias : null, calendar: calStatus, note: 'Expectations come from the calendar feed (forecast and previous) and the news you paste. This is a rules model, not a prediction.' };
+}
+async function cmdOutlook(q) {
+  await refreshCalendar().catch(() => {});
+  const text = q.raw.replace(/^\/outlook\S*\s*/i, '').trim(), d = outlookData(text.length > 25 ? text : '');
+  const L = ['OUTLOOK: what is coming and what to expect'];
+  if (!d.events.length) L.push('No high-impact events found in the next 45 days from the calendar feed.');
+  d.events.slice(0, 5).forEach(e => {
+    const when = new Date(e.t + CFG.tzOffset * 60000).toISOString().slice(5, 16).replace('T', ' ');
+    L.push('', e.name + '  (' + when + ' your time)', e.expected, 'Lean: ' + e.leanLabel, 'If ' + e.scenarios[0].label.toLowerCase() + ': ' + OUTLOOK.PAIRS.map(p => OUTLOOK.NAME[p] + ' ' + e.scenarios[0].pairs[p].dir).join(', '), 'If ' + e.scenarios[2].label.toLowerCase() + ': ' + OUTLOOK.PAIRS.map(p => OUTLOOK.NAME[p] + ' ' + e.scenarios[2].pairs[p].dir).join(', '), 'Why: ' + e.reasons[0]);
+  });
+  if (text.length > 25) { L.push('', 'FROM THE NEWS YOU PASTED'); OUTLOOK.PAIRS.forEach(p => L.push(d.signals[p])); if (d.paste.conflict) L.push('The text has mixed messages (hawkish and dovish, or risk-on and risk-off), so confidence is lower.'); }
+  else L.push('', 'Add news after the command to get a lean per pair, for example: /outlook Fed holds, signals higher for longer, yields rise');
+  L.push('', 'This is a rules model, not a prediction. ' + DISCLAIMER);
+  return L.join('\n');
+}
 async function runCommand(text, control) {
   const q = CHAT.parse(text), sym = q.sym || 'XAUUSD', tf = q.tf || 'H4';
   try {
     switch (q.cmd) {
       case 'help': return CHAT.HELP;
+      case 'outlook': return await cmdOutlook(q);
       case 'alert': case 'alerts': return await cmdAlert(q);
       case 'status': return await cmdStatus();
       case 'signal': return await cmdSignal(sym, tf);
@@ -1254,6 +1278,19 @@ const server = http.createServer(async (req, res) => {
       let b = {}; try { b = JSON.parse(await readBody(req) || '{}'); } catch (e) {}
       if (p === '/api/alerts/remove') { const i = state.priceAlerts.findIndex(x => x.id === +b.id); if (i >= 0) { state.priceAlerts.splice(i, 1); await saveState(); } return send(res, 200, { ok: true, alerts: state.priceAlerts.filter(x => !x.hit) }); }
       const r = await addPriceAlert(b.sym, b.price, b.note); return send(res, r.error ? 400 : 200, r.error ? r : { ok: true, alert: r.alert, alerts: state.priceAlerts.filter(x => !x.hit) });
+    }
+    if (p === '/api/outlook') {
+      let b = {}; if (req.method === 'POST') { try { b = JSON.parse(await readBody(req) || '{}'); } catch (e) {} }
+      await refreshCalendar().catch(() => {});
+      return send(res, 200, outlookData(String(b.text || q.get('text') || '').slice(0, 12000)));
+    }
+    if (p === '/api/outlook/apply' && req.method === 'POST') {
+      if (!AUTO.isAdmin(req.headers['x-admin'] || q.get('token'))) return send(res, 403, { error: 'admin token needed' });
+      let b = {}; try { b = JSON.parse(await readBody(req) || '{}'); } catch (e) {}
+      if (b.clear) { state.outlookBias = null; await saveState(); return send(res, 200, { ok: true, cleared: true }); }
+      const an = OUTLOOK.analyzeText(String(b.text || '').slice(0, 12000)), bb = {};
+      OUTLOOK.PAIRS.forEach(p => { const l = an.pairs[p].label; bb[p] = /^Bullish/.test(l) ? 'bullish' : /^Bearish/.test(l) ? 'bearish' : 'neutral'; });
+      state.outlookBias = { at: Date.now(), b: bb }; await saveState(); return send(res, 200, { ok: true, applied: state.outlookBias, hours: 12 });
     }
     if (p === '/api/forecast') return send(res, 200, await forecasts());
     if (p === '/api/forecast/result' && req.method === 'POST') {

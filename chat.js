@@ -3,8 +3,9 @@
    Keyword matching only, so it costs nothing and never guesses wildly. The server runs the command. */
 
 const SYMS = [[/\b(xauusd|xau|gold)\b/i, 'XAUUSD'], [/\b(xagusd|xag|silver)\b/i, 'XAGUSD'], [/\b(btcusd|btc|bitcoin)\b/i, 'BTCUSD'], [/\b(usdjpy|yen|jpy)\b/i, 'USDJPY'], [/\b(gbpusd|gbp|pound|cable|sterling)\b/i, 'GBPUSD'], [/\b(ustec|nas100|nasdaq|nq)\b/i, 'USTEC']];
-const COMMANDS = ['help', 'start', 'status', 'signal', 'why', 'pause', 'resume', 'risk', 'news', 'paper', 'learn', 'validate', 'best', 'report', 'whatif', 'ask', 'progress', 'entered', 'closed', 'added', 'aplus', 'chart', 'trial', 'alert', 'alerts'];
+const COMMANDS = ['help', 'start', 'status', 'signal', 'why', 'pause', 'resume', 'risk', 'news', 'paper', 'learn', 'validate', 'best', 'report', 'whatif', 'ask', 'progress', 'entered', 'closed', 'added', 'aplus', 'chart', 'trial', 'alert', 'alerts', 'outlook'];
 const NL = [
+  ['outlook', /\b(outlook|what to expect|upcoming (news|events?)|next (news|events?)|expect(ed)? (from|for) (the )?(fed|cpi|nfp|boj))\b/],
   ['alert', /\b(alert me|notify me|wake me|tell me when|let me know when|ping me when)\b/],
   ['chart', /\b(chart check|check (the |my |this )?chart|analy[sz]e (the |my |this )?chart|read (the |my |this )?chart)\b/],
   ['whatif', /what\s*if|scenario|suppose|if (cpi|nfp|inflation|payrolls)/],
@@ -50,6 +51,7 @@ const HELP = [
   '/aplus on  only alert the strictest setups (/aplus off to go back)',
   '/trial  are the proven alerts ready yet? (/trial off stops the practice alerts once Chloe says READY)',
   '/alert gold 4200  message me when gold touches 4200, even while I sleep (/alerts lists them, /alert remove 2 deletes one, /alert clear deletes all)',
+  '/outlook  upcoming events: what is expected and what it usually does to your pairs (/outlook followed by pasted news gives each pair a lean)',
   '/paper  the paper-trading record',
   '/learn  what Chloe noticed in her mistakes (approve or reject with /learn approve 1)',
   '/news  next big events and the CPI/NFP odds',
