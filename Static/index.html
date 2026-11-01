@@ -285,6 +285,17 @@ details[open] summary{margin-bottom:10px}
 
 <!-- NEWS -->
 <section class="panel" id="p-news" hidden>
+  <div class="card" id="olCard">
+    <h2>Outlook: what is coming and what to expect</h2>
+    <p class="note" style="margin-top:0">Each upcoming event shows what the market expects, what it usually does to your four pairs if it comes in hotter, in line or cooler, and the reason. Paste news or your own notes below to get a lean for each pair. It is a rules model, not a prediction.</p>
+    <label>Paste news, a Fed or Bank of Japan quote, or your own notes<textarea id="olText" style="min-height:130px" placeholder="Example: Fed holds rates but signals higher for longer. Yields rise and the dollar strengthens. Oil jumps on war escalation."></textarea></label>
+    <div class="btns" style="margin-top:8px"><button class="btn primary" id="olGo" type="button">Analyze</button><button class="btn" id="olApply" type="button">Use as Chloe's news view (12 h)</button><button class="btn" id="olClear" type="button">Clear</button></div>
+    <div class="note" id="olMsg" style="margin-top:6px"></div>
+    <div id="olPairs" style="display:grid;gap:8px;margin-top:10px"></div>
+    <h3 style="margin:16px 0 6px">Upcoming events</h3>
+    <div id="olEvents" style="display:grid;gap:10px"></div>
+    <div class="note" id="olFoot" style="margin-top:8px"></div>
+  </div>
   <div class="card" id="scCard">
     <h2>If the number comes in above or below</h2>
     <p class="note" style="margin-top:0">What usually happens to each pair, and why. Pick the report and the result.</p>
@@ -2864,6 +2875,7 @@ bind('btnUndo',function(){curDraw().pop();saveDraw();drawChart()},'click');
 bind('alSet',setAlert,'click');
 bind('alHi',function(){var r=range4h(S.candles);if(r)$('alPrice').value=r.hi.toFixed(INSTR[S.sym].dec)},'click');
 bind('alLo',function(){var r=range4h(S.candles);if(r)$('alPrice').value=r.lo.toFixed(INSTR[S.sym].dec)},'click');
+wireOutlook();
 bind('btnBig',function(){S.big=!S.big;saveView();tvSync();drawChart()},'click');
 bind('btnFs',function(){S.fs=!S.fs;document.body.style.overflow=S.fs?'hidden':'';tvSync();drawChart();var c=$('chartCard');if(c&&S.fs)c.scrollTop=0},'click');
 bind('btnTv',function(){S.tv=!S.tv;tvSync();if(!S.tv)drawChart()},'click');
@@ -2913,6 +2925,56 @@ function setAlert(){
     if(j.error){renderAlerts(j.error==='admin token needed'?'That admin token was not accepted. Check it in the Auto tab.':j.error);return}
     S.alerts=j.alerts||[];$('alPrice').value='';renderAlerts('Alert set. Chloe will message you on Telegram when '+S.sym+' touches '+v+'.');drawChart()});
 }
+var OLD=null;
+function olArrow(d){return d==='up'?['▲ up','var(--buy)']:d==='down'?['▼ down','var(--sell)']:['– flat','var(--muted)']}
+function olText(){try{return localStorage.getItem('chloe.outlook.text')||''}catch(e){return ''}}
+function loadOutlook(force){
+  var ta=$('olText');if(!ta)return;
+  if(!ta.dataset.init){ta.dataset.init='1';ta.value=olText();ta.addEventListener('input',function(){try{localStorage.setItem('chloe.outlook.text',ta.value)}catch(e){}})}
+  if(!force&&OLD&&Date.now()-OLD.at<120000)return;
+  fetch('/api/outlook',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:ta.value})}).then(function(r){return r.json()}).then(function(j){OLD={at:Date.now(),j:j};renderOutlook(j)}).catch(function(){$('olMsg').textContent='Could not reach the server. Try again in a moment.'});
+}
+function renderOutlook(j){
+  var pr=$('olPairs'),ev=$('olEvents');pr.textContent='';ev.textContent='';
+  var p=j.paste||{};
+  if(p.hits){
+    ['XAUUSD','USDJPY','BTCUSD','USTEC'].forEach(function(sym){
+      var r=p.pairs[sym],box=el('div');box.style.cssText='border:1px solid var(--line);border-radius:10px;padding:8px 10px';
+      var head=el('div');head.style.cssText='display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap';
+      var col=/^Bullish/.test(r.label)?'var(--buy)':/^Bearish/.test(r.label)?'var(--sell)':'var(--muted)';
+      var b=el('b',null,r.name+': '+r.label);b.style.color=col;head.appendChild(b);head.appendChild(el('span','mono','score '+(r.score>0?'+':'')+r.score+', confidence '+r.conf));box.appendChild(head);
+      box.appendChild(el('div','note',j.signals[sym]));pr.appendChild(box)});
+    if(p.conflict)pr.appendChild(el('div','note','The text has mixed messages (hawkish and dovish, or risk-on and risk-off), so confidence is lower.'));
+    $('olMsg').textContent=j.applied?'Applied to Chloe until '+new Date(j.applied.at+12*3600000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})+'. Chloe uses it as the news view for her signals.':'';
+  }else{ $('olMsg').textContent=(p.summary||'')+(j.applied?' (A news view you applied earlier is still active.)':''); }
+  if(!(j.events||[]).length)ev.appendChild(el('div','note','No high-impact events found in the next 45 days. The calendar feed may be limiting requests, so check again later.'));
+  (j.events||[]).forEach(function(e){
+    var c=el('div');c.style.cssText='border:1px solid var(--line);border-radius:12px;padding:10px 12px';
+    var h=el('div');h.style.cssText='display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:baseline';
+    h.appendChild(el('b',null,e.name));h.appendChild(el('span','mono',new Date(e.t).toLocaleString([], {weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})+'  ('+(e.inMs>0?'in '+fmtDur(e.inMs):'just happened')+')'));c.appendChild(h);
+    c.appendChild(el('div','note','Expected: '+e.expected));
+    var lean=el('div','note','Lean: '+e.leanLabel);lean.style.fontWeight='600';c.appendChild(lean);
+    var tb=el('div');tb.style.cssText='display:grid;grid-template-columns:1.5fr repeat(4,1fr);gap:4px 6px;font-size:12px;margin:8px 0;align-items:center';
+    tb.appendChild(el('span'));['Gold','USDJPY','BTC','Nasdaq'].forEach(function(n){var x=el('b',null,n);x.style.textAlign='center';tb.appendChild(x)});
+    e.scenarios.forEach(function(sc){
+      var l=el('span',null,sc.label.replace('Comes in ','').replace(' than expected','').replace('In line with the forecast','In line')+' ('+sc.odds+'%)');tb.appendChild(l);
+      ['XAUUSD','USDJPY','BTCUSD','USTEC'].forEach(function(sym){var a=olArrow(sc.pairs[sym].dir),x=el('span',null,a[0]);x.style.cssText='text-align:center;color:'+a[1]+(sc.pairs[sym].size==='big'?';font-weight:700':'');tb.appendChild(x)})});
+    c.appendChild(tb);
+    var d=el('details');d.appendChild(el('summary',null,'Why'));e.reasons.forEach(function(t){d.appendChild(el('p','note',t))});d.appendChild(el('p','note',e.tip));if(e.note)d.appendChild(el('p','note',e.note));c.appendChild(d);
+    ev.appendChild(c)});
+  $('olFoot').textContent=j.note||'';
+}
+function wireOutlook(){
+  var g=$('olGo');if(!g)return;
+  g.addEventListener('click',function(){loadOutlook(true)});
+  $('olClear').addEventListener('click',function(){$('olText').value='';try{localStorage.removeItem('chloe.outlook.text')}catch(e){}loadOutlook(true)});
+  $('olApply').addEventListener('click',function(){
+    if(!admTok()){$('olMsg').textContent='Add your admin token in the Auto tab first, then this works.';return}
+    api('/api/outlook/apply','POST',{text:$('olText').value}).then(function(r){
+      if(r.error){$('olMsg').textContent=r.error==='admin token needed'?'That admin token was not accepted. Check it in the Auto tab.':r.error;return}
+      loadOutlook(true)})
+  });
+}
 function updateTv(){try{if(S.tv)tvSync()}catch(e){}try{if(Date.now()-(S.alAt||0)>60000){S.alAt=Date.now();loadAlerts()}}catch(e){}var sy=TVSYM[S.sym]||('OANDA:'+L());$('tvLink').setAttribute('href','https://www.tradingview.com/chart/?symbol='+encodeURIComponent(sy)+'&interval='+TVINT[S.tf])}
 
 /* tabs */
@@ -2929,7 +2991,7 @@ function select(name){
   if(name==='progress')loadProgress();
   if(name==='strat')loadBest();
   if(name==='auto')loadAuto();
-  if(name==='news')loadForecast();
+  if(name==='news'){loadForecast();loadOutlook()}
 }
 Array.prototype.forEach.call(document.querySelectorAll('nav button'),function(b){b.addEventListener('click',function(){select(b.dataset.tab)})});
 
