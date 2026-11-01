@@ -502,6 +502,15 @@ details[open] summary{margin-bottom:10px}
         </div>
         <p class="note" id="auMsg" style="margin-bottom:0"></p>
       </div>
+      <div class="card" id="auTgt">
+        <h2>Stop at a target</h2>
+        <p class="note" style="margin-top:0">Chloe takes every scalp and swing signal on her own and sets the lot size, stop and target. Pick the figure you want your account to reach. When your equity gets there she stops.</p>
+        <div class="btns" id="tgBtns"></div>
+        <div style="display:flex;gap:8px;margin-top:8px"><input id="tgCustom" type="number" inputmode="decimal" placeholder="Or type your own figure" style="flex:1;min-width:0"><button class="btn" id="tgSet" type="button">Set</button></div>
+        <label class="chk" style="margin-top:8px"><input id="tgClose" type="checkbox" checked>Close open trades when the target is reached</label>
+        <div id="tgBar" style="height:10px;border-radius:6px;background:var(--surface2);margin-top:10px;overflow:hidden"><div id="tgFill" style="height:100%;width:0;background:var(--accent)"></div></div>
+        <p class="note" id="tgNote" style="margin-bottom:0"></p>
+      </div>
       <div class="card" id="auPend" hidden style="border-color:var(--accent)">
         <h2>Waiting for your answer</h2>
         <p class="note" style="margin-top:0">Chloe found a trade. It only goes to MT5 if you lock it in.</p>
@@ -2335,8 +2344,27 @@ function loadAuto(){
 function money2(x,c){return x==null?'-':(Number(x).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})+(c?' '+c:''))}
 function chipEl(txt,ok){var c=el('span','chip '+(ok===true?'ok':(ok===false?'warn':'')));c.appendChild(document.createElement('i'));c.appendChild(document.createTextNode(txt));return c}
 var auSel=null,auPairs=[];
+function renderTarget(j){
+  var t=j.target||{figure:0},box=$('tgBtns');if(!box)return;box.textContent='';
+  [500,1000,2000,5000,0].forEach(function(v){
+    var b=el('button','btn'+(t.figure===v?' primary':''),v?String(v):'No target');b.type='button';
+    b.addEventListener('click',function(){setTarget(v)});box.appendChild(b)});
+  var cl=$('tgClose');cl.checked=!!t.closeOnTarget;
+  if(!cl.dataset.w){cl.dataset.w='1';cl.addEventListener('change',function(){api('/api/auto/config','POST',{closeOnTarget:cl.checked}).then(function(){loadAuto()})});
+    $('tgSet').addEventListener('click',function(){var v=parseFloat($('tgCustom').value);if(!(v>0)){$('tgNote').textContent='Type a figure above your current equity.';return}setTarget(v)})}
+  var eq=t.equity||0,fill=$('tgFill'),note=$('tgNote');
+  if(t.hit){fill.style.width='100%';note.textContent='Target of '+t.hit.target+' reached at equity '+t.hit.eq.toFixed(2)+'. Chloe stopped'+(t.hit.closed?' and closed the open trades':'')+'. Pick a new figure and turn her on to carry on.';return}
+  if(t.figure>0){var base=Math.max(0,Math.min(eq,t.figure)),pct=t.figure>0?Math.round(base/t.figure*100):0;fill.style.width=pct+'%';
+    note.textContent='Stops when equity reaches '+t.figure+'. Now '+(eq?eq.toFixed(2):'unknown')+' ('+pct+'% of the way).'}
+  else{fill.style.width='0';note.textContent='No target set. Chloe keeps trading until you switch her off or a safety limit stops her.'}
+}
+function setTarget(v){
+  $('tgNote').textContent='Saving...';
+  api('/api/auto/config','POST',{targetEq:v}).then(function(r){if(!r.ok){$('tgNote').textContent=r.error||'Not saved.';return}$('tgCustom').value='';loadAuto()})
+}
 function renderAuto(){
   var j=AU,c=j.cfg,a=j.account,ch=$('auChips');ch.textContent='';
+  renderTarget(j);
   ch.appendChild(chipEl(j.connected?'Expert Advisor online':'Expert Advisor offline'+(j.lastSeenSec!=null?' ('+j.lastSeenSec+' s ago)':''),j.connected));
   ch.appendChild(chipEl(c.enabled?'Automation ON':'Automation OFF',c.enabled?true:null));
   ch.appendChild(chipEl(c.mode==='live'?'LIVE mode':'Demo mode',c.mode==='live'?false:true));
