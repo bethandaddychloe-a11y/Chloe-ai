@@ -340,7 +340,7 @@ function planLines(sym, p, d) {
   return ['Entry ' + num(p.entry, d) + '   SL ' + num(p.sl, d) + ' (' + num(p.dist / INSTR[sym].pip, 1) + ' pips)', p.tps[0].p === p.tps[2].p ? 'Target ' + num(p.tps[0].p, d) + ' (middle of the 4 hour range)' : 'TP1 ' + num(p.tps[0].p, d) + '  TP2 ' + num(p.tps[1].p, d) + '  TP3 ' + num(p.tps[2].p, d), 'Lots ' + lots(sym, p.entry, p.dist).toFixed(2) + ' (risk ' + CFG.riskPct + '% of ' + CFG.balance + ')'];
 }
 const whyOf = checks => 'Why: ' + checks.filter(c => c[1]).map(c => c[0]).join('; ');
-const DISCLAIMER = 'Check the news before you act. This is not financial advice. Demo first.';
+const DISCLAIMER = 'Check the news before you act. This is not financial advice.';
 
 /* ---------- telegram ---------- */
 async function telegram(text) {
@@ -711,6 +711,7 @@ function tierOf(sym, tf, strat) {
 }
 const tierHead = (tier, word) => tier.proven ? 'CHLOE AI: PROVEN' + (tier.via === 'backtest' ? ' (2 years of tests)' : '') + ' ' + word : 'CHLOE AI: TRIAL ' + word + ' (not proven yet, demo only)';
 const tierLine = tier => tier.proven ? 'Proof: ' + (tier.via === 'backtest' ? 'profitable in both 2025 and 2026 gold prices after costs (thin edge, small sample, keep risk small).' : tier.via === 'history' ? 'this strategy held up on the part of the price history it was not tuned on.' : 'this strategy has a good live paper record on this pair.') : 'Proof: none yet for this strategy on this pair. Treat it as practice.';
+const autoOn = () => { const c = state.auto && state.auto.cfg; return !!(c && c.enabled && !c.killed); }; // with automation on, every signal on your four pairs is traded, not only the proven or trial ones
 const trialAllowed = (sym, strat) => state.trial !== false && CFG.alertPairs.includes(sym) && (sym === 'BTCUSD' || CFG.alertStrats.includes(strat)); // BTC (24/7) may use any strategy
 const quietWhy = () => state.trial === false ? 'trial alerts are off' : 'not proven yet, so it is only recorded (trial alerts are limited to ' + CFG.alertPairs.join('/') + ' with ' + CFG.alertStrats.join(' and ') + ')';
 function provenCombos() {
@@ -810,7 +811,7 @@ async function swingAlerts() {
         const key = [sym, tf, sg.dir, sg.strat, cs[cs.length - 1].t].join('|');
         const tg2 = Object.assign({}, tags, { htf: INTEL.ctxTags({ dir: sg.dir, htf: sg.htf, ms: Date.now() }).htf }), ap = aplusCheck(sym, tf, sg.stratName, tg2, sg.conf), tier = tierOf(sym, tf, sg.stratName), quiet = !tier.proven && !trialAllowed(sym, sg.stratName);
         tg2.aplus = ap.ok; tg2.proven = tier.proven;
-        if (recordPaper('swing', sym, tf, sg, cs[cs.length - 1].t, sg.conf, sg.stratName, tg2)) { queueValidation(sym, tf); if (!quiet) AUTO.offer({ kind: 'swing', sym, tf, dir: sg.dir, conf: sg.conf, strat: sg.stratName, plan: sg.plan, stale: null, proven: tierOf(sym, tf, sg.stratName).proven }); }
+        if (recordPaper('swing', sym, tf, sg, cs[cs.length - 1].t, sg.conf, sg.stratName, tg2)) { queueValidation(sym, tf); if (!quiet || autoOn()) AUTO.offer({ kind: 'swing', sym, tf, dir: sg.dir, conf: sg.conf, strat: sg.stratName, plan: sg.plan, stale: null, proven: tierOf(sym, tf, sg.stratName).proven }); }
         if (quiet) { bump('quiet'); status += ' (recorded only: ' + quietWhy(ap) + ')'; }
         else if (!state.sent[key]) {
           const d = INSTR[sym].dec, pid = paperIdFor(sym, tf, sg.dir, sg.stratName, cs[cs.length - 1].t);
@@ -851,7 +852,7 @@ async function scalpAlerts(items, opt) {
         let fresh = false;
         const ap = aplusCheck(sym, tf, a.name, tags, a.conf), tier = tierOf(sym, tf, a.name), quiet = !tier.proven && !trialAllowed(sym, a.name); tags.aplus = ap.ok; tags.proven = tier.proven;
         if (!cool && (state.scalpDay[dayKey] || 0) < CFG.scalpMaxPerDay && recordPaper('scalp', sym, tf, { dir: a.dir, plan: a.plan }, cs[cs.length - 1].t, a.conf, a.name, tags)) {
-          fresh = true; bump('found'); queueValidation(sym, tf); if (!quiet) AUTO.offer({ kind: 'scalp', sym, tf, dir: a.dir, conf: a.conf, strat: a.name, plan: a.plan, stale: null, proven: tier.proven, noTrail: NOTRAIL.includes(a.name) }); state.lastScalp[sym] = Date.now(); state.scalpDay[dayKey] = (state.scalpDay[dayKey] || 0) + 1;
+          fresh = true; bump('found'); queueValidation(sym, tf); if (!quiet || autoOn()) AUTO.offer({ kind: 'scalp', sym, tf, dir: a.dir, conf: a.conf, strat: a.name, plan: a.plan, stale: null, proven: tier.proven, noTrail: NOTRAIL.includes(a.name) }); state.lastScalp[sym] = Date.now(); state.scalpDay[dayKey] = (state.scalpDay[dayKey] || 0) + 1;
         }
         if (fresh && quiet) { bump('quiet'); status += ' (recorded only: ' + quietWhy(ap) + ')'; }
         else if (fresh && !state.sent[key]) {

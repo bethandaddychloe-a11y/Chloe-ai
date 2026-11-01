@@ -7,7 +7,7 @@ const LIVE_PHRASE = 'I ACCEPT THE RISK OF REAL LOSSES';
 const PLANS = {
   steady: { id: 'steady', name: 'Steady', desc: 'Small fixed risk, swing signals only, strict daily stop. The sensible first plan.', risk: 0.5, maxOpen: 2, maxDay: 3, dayLoss: 2, weekLoss: 4, ddStop: 8, tp: 'tp2', kinds: ['swing'], minConf: 60 },
   standard: { id: 'standard', name: 'Standard', desc: 'One percent risk, swings and scalps, moderate limits.', risk: 1, maxOpen: 3, maxDay: 5, dayLoss: 3, weekLoss: 6, ddStop: 12, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55 },
-  scalper: { id: 'scalper', name: 'Aggressive Scalper', desc: 'The only mode. Takes every scalp and every swing signal on its own, sizes the lot from the stop distance and a share of your CURRENT equity so lots grow with the account, sets the stop and target, and uses a trailing stop. Optionally stops when your equity reaches a target figure.', risk: 0.5, maxOpen: 5, maxDay: 200, dayLoss: 15, weekLoss: 30, ddStop: 50, tp: 'tp2', kinds: ['scalp', 'swing'], minConf: 50 },
+  scalper: { id: 'scalper', name: 'Aggressive Scalper', desc: 'The only mode. Takes every scalp and every swing signal on its own, sizes the lot from the stop distance and a share of your CURRENT equity so lots grow with the account, sets the stop and target, and uses a trailing stop. Optionally stops when your equity reaches a target figure.', risk: 0.5, maxOpen: 10, maxDay: 300, dayLoss: 15, weekLoss: 30, ddStop: 50, tp: 'tp2', kinds: ['scalp', 'swing'], minConf: 0 },
   grow: { hidden: true, id: 'grow', name: 'Step-up', desc: 'Starts at 1% and adds 0.25% after each win up to 2%. A loss drops it back to 1%. Raises risk only while winning.', risk: 1, ramp: { step: 0.25, max: 2 }, maxOpen: 3, maxDay: 5, dayLoss: 3, weekLoss: 7, ddStop: 12, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55 },
   target: { id: 'target', name: 'Daily target', desc: 'One percent risk. Stops for the day after gaining 3% or losing 2%, then waits for tomorrow.', risk: 1, maxOpen: 2, maxDay: 4, dayLoss: 2, dayGain: 3, weekLoss: 5, ddStop: 10, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55 },
   goal: { hidden: true, id: 'goal', name: 'Goal plan', desc: 'You set a start, a target and a number of trades. Chloe works out the risk per trade needed to get there and trades it, rolling all profit into the next trade. Demo only.', risk: 10, maxOpen: 1, maxDay: 3, dayLoss: 60, weekLoss: 90, ddStop: 85, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55, demoOnly: true, goal: true },
@@ -79,7 +79,7 @@ module.exports = function makeAuto(D) {
     if (!fam.every(t => protectedPos(posOf(t), t.dir))) return { why: 'the open ' + sig.sym + ' trade is not protected at break-even yet' };
     return { parent, adds, r };
   }
-  const USD_SIDE = { XAUUSD: -1, XAGUSD: -1, BTCUSD: -1, GBPUSD: -1, USTEC: -1, USDJPY: 1 }, MAX_SAME_USD = Math.round(num(ENV.AUTO_MAX_SAME_USD, 1, 10, 2));
+  const USD_SIDE = { XAUUSD: -1, XAGUSD: -1, BTCUSD: -1, GBPUSD: -1, USTEC: -1, USDJPY: 1 }, MAX_SAME_USD = Math.round(num(ENV.AUTO_MAX_SAME_USD, 1, 20, 10));
   const usdOf = (sym, dir) => (USD_SIDE[sym] || 0) * (dir === 'BUY' ? 1 : -1);
   function guard(sig, selfId) {
     const a = A(), c = a.cfg, p = planOf(), hb = a.hb, now = Date.now();
@@ -90,7 +90,6 @@ module.exports = function makeAuto(D) {
     if (!EA_KEY) return 'EA_KEY is not set on the server';
     if (!hb || now - hb.at > 180000) return 'the Expert Advisor is offline';
     if (hb.account && hb.account.demo === (c.mode === 'live')) return 'account type does not match ' + c.mode + ' mode';
-    if (c.mode === 'live' && p.demoOnly) return 'live mode is not unlocked for this plan';
     if (p.goal && !c.goal.active) return 'the goal plan is not running, press Start goal plan';
     if (!c.pairs.includes(sig.sym)) return sig.sym + ' is not selected';
     { const u = usdOf(sig.sym, sig.dir); if (u) { const same = a.trades.filter(t => OPEN_ST.includes(t.status) && t.id !== selfId && t.mode === c.mode && !(t.sym === sig.sym && t.dir === sig.dir) && usdOf(t.sym, t.dir) === u).length; if (same >= MAX_SAME_USD) return 'already ' + same + ' open trades betting the same way on the dollar (pairs move together)'; } }
@@ -102,8 +101,9 @@ module.exports = function makeAuto(D) {
     { let streak = 0; for (const t of a.trades.filter(t => t.mode === c.mode && t.status === 'closed' && t.closedAt && new Date(t.closedAt).toISOString().slice(0, 10) === day()).sort((x, y) => y.closedAt - x.closedAt)) { if ((t.profit || 0) < 0) streak++; else break; } if (streak >= LOSS_STREAK) return streak + ' losses in a row today, stopped until tomorrow'; }
     if (evs().some(e => e.t - now < 30 * 60000 && e.t - now > -15 * 60000)) return 'news blackout around a scheduled release';
     const fam = famOf(sig, selfId);
-    if (fam.length) { const r = addCheck(sig, fam, selfId); if (r.why) return r.why; }
+    if (fam.length && c.scale && c.scale.on) { const r = addCheck(sig, fam, selfId); if (r.why) return r.why; }
     else {
+      if (fam.some(t => t.dir === sig.dir && t.strat === sig.strat && t.tf === sig.tf && now - t.at < 5 * 60000)) return 'the same signal was already sent a moment ago';
       const live = a.trades.filter(t => t.mode === c.mode && OPEN_ST.includes(t.status) && !t.isAdd && t.id !== selfId);
       if (live.length >= p.maxOpen) return 'already at ' + p.maxOpen + ' open trades';
       if (a.trades.filter(t => t.mode === c.mode && !t.isAdd && !DEAD_ST.includes(t.status) && t.id !== selfId && new Date(t.at).toISOString().slice(0, 10) === day()).length >= p.maxDay) return 'daily trade limit reached';
@@ -257,7 +257,6 @@ module.exports = function makeAuto(D) {
     if (b.mode) {
       if (b.mode === 'live') {
         const p = planOf(), lr = liveReady();
-        if (p.demoOnly) return err('The ' + p.name + ' plan is demo only. Pick another plan for a live account.');
         c.liveAckAt = Date.now();
       } else if (b.mode !== 'demo') return err('mode must be demo or live');
       c.mode = b.mode;
@@ -268,7 +267,6 @@ module.exports = function makeAuto(D) {
       
       c.enabled = !!b.enabled;
     }
-    if (c.mode === 'live' && planOf().demoOnly) { c.enabled = false; return err('That plan is demo only, so automation was switched off. Pick another plan.'); }
     await saveState(); return { ok: true };
   }
   async function kill(closeAll) { const a = A(); a.cfg.killed = true; a.cfg.killReason = 'pressed by you'; a.cfg.enabled = false; for (const t of a.trades) if (t.status === 'queued' || t.status === 'pending') { t.status = 'expired'; t.err = 'kill switch'; } if (closeAll) a.closeAllPending = true; await saveState(); telegram('CHLOE AUTO: KILL SWITCH pressed. No new trades' + (closeAll ? ', closing open trades.' : '.')); return { ok: true }; }
