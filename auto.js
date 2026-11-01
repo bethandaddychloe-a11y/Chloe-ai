@@ -7,7 +7,7 @@ const LIVE_PHRASE = 'I ACCEPT THE RISK OF REAL LOSSES';
 const PLANS = {
   steady: { id: 'steady', name: 'Steady', desc: 'Small fixed risk, swing signals only, strict daily stop. The sensible first plan.', risk: 0.5, maxOpen: 2, maxDay: 3, dayLoss: 2, weekLoss: 4, ddStop: 8, tp: 'tp2', kinds: ['swing'], minConf: 60 },
   standard: { id: 'standard', name: 'Standard', desc: 'One percent risk, swings and scalps, moderate limits.', risk: 1, maxOpen: 3, maxDay: 5, dayLoss: 3, weekLoss: 6, ddStop: 12, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55 },
-  scalper: { id: 'scalper', name: 'Aggressive Scalper', desc: 'The only mode. Scalps every pair on the 5 minute chart, risks a share of your CURRENT equity so lots grow with the account, and uses a trailing stop. Just switch it on or off.', risk: 0.5, maxOpen: 5, maxDay: 200, dayLoss: 15, weekLoss: 30, ddStop: 50, tp: 'tp2', kinds: ['scalp'], minConf: 50 },
+  scalper: { id: 'scalper', name: 'Aggressive Scalper', desc: 'The only mode. Takes every scalp and every swing signal on its own, sizes the lot from the stop distance and a share of your CURRENT equity so lots grow with the account, sets the stop and target, and uses a trailing stop. Optionally stops when your equity reaches a target figure.', risk: 0.5, maxOpen: 5, maxDay: 200, dayLoss: 15, weekLoss: 30, ddStop: 50, tp: 'tp2', kinds: ['scalp', 'swing'], minConf: 50 },
   grow: { hidden: true, id: 'grow', name: 'Step-up', desc: 'Starts at 1% and adds 0.25% after each win up to 2%. A loss drops it back to 1%. Raises risk only while winning.', risk: 1, ramp: { step: 0.25, max: 2 }, maxOpen: 3, maxDay: 5, dayLoss: 3, weekLoss: 7, ddStop: 12, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55 },
   target: { id: 'target', name: 'Daily target', desc: 'One percent risk. Stops for the day after gaining 3% or losing 2%, then waits for tomorrow.', risk: 1, maxOpen: 2, maxDay: 4, dayLoss: 2, dayGain: 3, weekLoss: 5, ddStop: 10, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55 },
   goal: { hidden: true, id: 'goal', name: 'Goal plan', desc: 'You set a start, a target and a number of trades. Chloe works out the risk per trade needed to get there and trades it, rolling all profit into the next trade. Demo only.', risk: 10, maxOpen: 1, maxDay: 3, dayLoss: 60, weekLoss: 90, ddStop: 85, tp: 'tp2', kinds: ['swing', 'scalp'], minConf: 55, demoOnly: true, goal: true },
@@ -30,7 +30,7 @@ module.exports = function makeAuto(D) {
     if (!a.cfg.pairsV) { a.cfg.pairsV = 2; ['USTEC', 'XAUUSD'].forEach(s => { if (!a.cfg.pairs.includes(s)) a.cfg.pairs.push(s); }); } // silver joined the list
     if (PLANS[a.cfg.plan] && PLANS[a.cfg.plan].hidden) a.cfg.plan = 'scalper';
     a.cfg.scale = Object.assign({ on: true, addAtR: 1, maxAdds: 2, addFrac: 0.5 }, a.cfg.scale || {}); a.cfg.approval = a.cfg.approval === 'auto' ? 'auto' : 'ask';
-    a.cfg.plan = 'scalper'; a.cfg.approval = 'auto'; a.cfg.scale.on = false; a.cfg.pairs = ['XAUUSD', 'USDJPY', 'BTCUSD', 'USTEC']; // one fixed mode: nothing to configure
+    a.cfg.targetEq = num(a.cfg.targetEq, 0, 100000000, 0); if (a.cfg.closeOnTarget == null) a.cfg.closeOnTarget = true; a.cfg.plan = 'scalper'; a.cfg.approval = 'auto'; a.cfg.scale.on = false; a.cfg.pairs = ['XAUUSD', 'USDJPY', 'BTCUSD', 'USTEC']; // one fixed mode: nothing to configure
     a.trades = a.trades || []; a.seq = a.seq || 0; a.hb = a.hb || null; a.acct = a.acct || { peak: 0, day: null, week: null }; a.haltDay = a.haltDay || null; a.closeAllPending = !!a.closeAllPending;
     return a;
   }
@@ -94,6 +94,7 @@ module.exports = function makeAuto(D) {
     if (p.goal && !c.goal.active) return 'the goal plan is not running, press Start goal plan';
     if (!c.pairs.includes(sig.sym)) return sig.sym + ' is not selected';
     { const u = usdOf(sig.sym, sig.dir); if (u) { const same = a.trades.filter(t => OPEN_ST.includes(t.status) && t.id !== selfId && t.mode === c.mode && !(t.sym === sig.sym && t.dir === sig.dir) && usdOf(t.sym, t.dir) === u).length; if (same >= MAX_SAME_USD) return 'already ' + same + ' open trades betting the same way on the dollar (pairs move together)'; } }
+    if (c.targetEq > 0 && hb.account.equity >= c.targetEq) return 'your target of ' + c.targetEq + ' is reached';
     if (!p.kinds.includes(sig.kind)) return p.name + ' does not take ' + sig.kind + ' signals';
     if (sig.conf < p.minConf) return 'confidence ' + sig.conf + '% is under ' + p.minConf + '%';
     if (a.haltDay === day()) return 'stopped for today by the plan limits';
@@ -182,6 +183,13 @@ module.exports = function makeAuto(D) {
         else if (g.stopOnLoss && lost > 0) { g.active = false; c.enabled = false; g.result = { ok: false, at: now, trades: done.length, equity: eq, why: 'a trade lost' }; msgs.push('CHLOE GOAL: stopped after a losing trade (trade ' + done.length + ' of ' + g.trades + '). Balance ' + eq.toFixed(2) + '. The table needs every trade to win, so the run is over. Automation is off.'); }
         else if (done.length >= g.trades) { g.active = false; c.enabled = false; g.result = { ok: false, at: now, trades: done.length, equity: eq, why: 'trades used up' }; msgs.push('CHLOE GOAL: all ' + g.trades + ' trades used. Balance ' + eq.toFixed(2) + ' against a target of ' + g.target + '. Automation is off.'); }
       } }
+    /* target figure reached: stop for good (no new trades) and, if chosen, close what is open so the gain is banked */
+    if (c.enabled && c.targetEq > 0 && eq >= c.targetEq) {
+      c.enabled = false; a.targetHit = { at: now, eq, target: c.targetEq, closed: !!c.closeOnTarget };
+      if (c.closeOnTarget) a.closeAllPending = true;
+      for (const t of a.trades) if (t.status === 'queued' || t.status === 'pending') { t.status = 'expired'; t.err = 'target reached'; }
+      msgs.push('CHLOE AUTO: TARGET REACHED. Equity ' + eq.toFixed(2) + ' passed your target of ' + c.targetEq + '. Automation is off' + (c.closeOnTarget ? ' and open trades are being closed' : ', open trades keep their stops') + '. Choose a new target and turn it on to carry on.');
+    }
     /* limits */
     const p = planOf(), pl = ac.day.start > 0 ? (eq - ac.day.start) / ac.day.start * 100 : 0;
     if (a.haltDay !== day() && (pl <= -p.dayLoss || (p.dayGain && pl >= p.dayGain))) { a.haltDay = day(); msgs.push('CHLOE AUTO: stopped for today (' + pl.toFixed(1) + '% on the day).'); }
@@ -204,6 +212,7 @@ module.exports = function makeAuto(D) {
     const a = A(), c = a.cfg, p = planOf(), hb = a.hb, now = Date.now(), ac = a.acct, eq = hb ? hb.account.equity : 0;
     return {
       goal: (function () { const g = c.goal, d = goalDone(), eq0 = eq || g.startEq || g.start, left = Math.max(1, g.trades - d.length), grow = Math.pow(g.target / Math.max(eq0, 0.01), 1 / left) - 1; return Object.assign({}, g, { done: d.length, wins: d.filter(t => (t.profit || 0) >= 0).length, equity: eq || null, needPct: Math.round(grow * 1000) / 10 }); })(),
+      target: { figure: c.targetEq || 0, closeOnTarget: !!c.closeOnTarget, hit: a.targetHit || null, equity: eq || null, startEq: (ac.day && ac.day.start) || null },
       configured: { ea_key: !!EA_KEY, admin: !!ADMIN }, cfg: Object.assign({}, c), plan: Object.assign({}, p, { effRisk: effRisk(p) }), maxLiveRisk: MAX_LIVE_RISK, livePhrase: LIVE_PHRASE,
       plans: Object.values(PLANS).filter(x => !x.hidden).map(x => ({ id: x.id, name: x.name, desc: x.desc, risk: x.risk, ramp: x.ramp || null, maxOpen: x.maxOpen, maxDay: x.maxDay, dayLoss: x.dayLoss, dayGain: x.dayGain || null, weekLoss: x.weekLoss, ddStop: x.ddStop, tp: x.tp, kinds: x.kinds, minConf: x.minConf, demoOnly: !!x.demoOnly })),
       connected: !!(hb && now - hb.at < 180000), lastSeenSec: hb ? Math.round((now - hb.at) / 1000) : null, account: hb ? hb.account : null, positions: hb ? hb.positions : [],
@@ -233,6 +242,18 @@ module.exports = function makeAuto(D) {
     if (b.approval != null) { if (b.approval !== 'ask' && b.approval !== 'auto') return err('approval must be ask or auto'); c.approval = b.approval; }
     if (b.scale) { const x = b.scale, o = c.scale; c.scale = { on: x.on == null ? o.on : !!x.on, addAtR: num(x.addAtR, 0.5, 3, o.addAtR), maxAdds: Math.round(num(x.maxAdds, 0, 4, o.maxAdds)), addFrac: num(x.addFrac, 0.2, 1, o.addFrac) }; }
     if (b.closeOnKill != null) c.closeOnKill = !!b.closeOnKill;
+    if (b.closeOnTarget != null) c.closeOnTarget = !!b.closeOnTarget;
+    if (b.targetEq != null) {
+      const v = Number(b.targetEq);
+      if (!isFinite(v) || v < 0) return err('Pick a target figure, for example 500, 1000, 2000 or 5000.');
+      if (v === 0) { c.targetEq = 0; a.targetHit = null; }
+      else {
+        if (v < 20 || v > 100000000) return err('The target must be between 20 and 100,000,000.');
+        const eq0 = a.hb ? a.hb.account.equity : 0;
+        if (eq0 && v <= eq0) return err('The target must be above your current equity of ' + eq0.toFixed(2) + '.');
+        c.targetEq = Math.round(v * 100) / 100; a.targetHit = null;
+      }
+    }
     if (b.mode) {
       if (b.mode === 'live') {
         const p = planOf(), lr = liveReady();
@@ -243,6 +264,7 @@ module.exports = function makeAuto(D) {
     }
     if (b.enabled != null) {
       if (b.enabled && c.killed) return err('The kill switch is on. Press Resume first.');
+      if (b.enabled && c.targetEq > 0 && a.hb && a.hb.account.equity >= c.targetEq) return err('Your equity is already at or above the target of ' + c.targetEq + '. Pick a higher target first.');
       
       c.enabled = !!b.enabled;
     }
